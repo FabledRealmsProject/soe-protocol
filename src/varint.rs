@@ -12,6 +12,10 @@
 //! Larger values are encoded as three bytes (`0xFF` + big-endian `u16`) or seven
 //! bytes (`0xFF 0xFF 0xFF` + big-endian `u32`).
 
+// Internal codec utility: provides both encode and decode helpers; the encode side
+// is not yet exercised by the current protocol paths.
+#![allow(dead_code)]
+
 use crate::error::{Error, Result};
 use crate::io::{BinaryReader, BinaryWriter};
 

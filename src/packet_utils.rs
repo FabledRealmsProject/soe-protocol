@@ -33,6 +33,7 @@ pub fn read_op_code(buffer: &[u8]) -> Option<OpCode> {
 }
 
 /// Returns `true` if the OP code denotes a packet used within a session context.
+#[allow(dead_code)]
 pub fn is_contextual(op: OpCode) -> bool {
     matches!(
         op,
@@ -141,6 +142,10 @@ pub fn packet_minimum_length(op: OpCode, is_compression_enabled: bool, crc_lengt
 ///
 /// A MultiPacket payload (the bytes after the `0x00 0x03` OP code) consists of
 /// back-to-back sub-packets, each prefixed by its length as a MultiPacket varint.
+//
+// The session currently parses MultiPacket bundles inline; this module provides a
+// standalone pack/unpack surface that isn't yet wired into a production path.
+#[allow(dead_code)]
 pub mod multi {
     use super::*;
     use crate::io::{BinaryReader, BinaryWriter};

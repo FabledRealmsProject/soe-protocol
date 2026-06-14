@@ -10,23 +10,24 @@
 
 pub mod channel;
 pub mod constants;
-pub mod crc32;
+pub(crate) mod crc32;
 pub mod error;
-pub mod io;
-pub mod packet_utils;
+pub(crate) mod io;
+pub(crate) mod packet_utils;
 pub mod packets;
 pub mod protocol;
-pub mod rc4;
+pub(crate) mod rc4;
 pub mod session;
 pub mod socket;
 pub mod sync_rt;
 #[cfg(feature = "tokio")]
 pub mod tokio_rt;
-pub mod varint;
-pub mod zlib;
+pub(crate) mod varint;
+pub(crate) mod zlib;
 
 pub use error::{Error, Result};
 pub use protocol::{DisconnectReason, OpCode};
+pub use rc4::Rc4KeyState;
 pub use session::{
     ApplicationParameters, SessionEvent, SessionMode, SessionParameters, SessionState, SoeSession,
 };

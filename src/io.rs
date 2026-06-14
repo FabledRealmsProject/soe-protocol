@@ -4,6 +4,10 @@
 //! cursor-style reading and writing over byte slices, tracking an offset and
 //! returning [`Error::BufferTooShort`] when there is insufficient space.
 
+// Internal codec utility: provides a complete read/write surface; not every helper
+// is exercised by the current protocol paths.
+#![allow(dead_code)]
+
 use crate::error::{Error, Result};
 
 /// A cursor-style reader over a big-endian byte slice.

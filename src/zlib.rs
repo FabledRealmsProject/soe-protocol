@@ -3,6 +3,10 @@
 //! The SOE protocol compresses the wrapped packet data using zlib at the default
 //! compression level when compression is negotiated for a session.
 
+// Internal codec utility: the compression (encode) side is not yet wired into the
+// current protocol paths.
+#![allow(dead_code)]
+
 use std::io::{Read, Write};
 
 use flate2::Compression;
