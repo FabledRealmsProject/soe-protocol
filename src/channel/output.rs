@@ -5,7 +5,7 @@
 //! `ReliableDataOutputChannel2`, which trades the original's multi-packet bundling
 //! for a much simpler (and less bug-prone) go-back-N style window.
 //!
-//! Like the input channel, this is a sans-I/O component: enqueued data is fragmented
+//! Like the input channel, this is an I/O-agnostic component: enqueued data is fragmented
 //! into outgoing packets which accumulate in an internal queue. Calling
 //! [`ReliableDataOutputChannel::run_tick`] moves due packets into the outgoing buffer
 //! (drained via [`ReliableDataOutputChannel::take_outgoing`]). Acknowledgements are

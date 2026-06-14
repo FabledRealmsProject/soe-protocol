@@ -13,9 +13,36 @@ PlanetSide 2, and others). On top of raw UDP it adds:
 - **Optional compression** (zlib) of contextual packets.
 - **Optional encryption** (RC4) of application data.
 
-## Design: a sans-I/O core
+This implementation is an AI-assisted port informed by the public C# and Zig implementations in
+[Sanctuary.SoeProtocol](https://github.com/PS2Sanctuary/Sanctuary.SoeProtocol).
 
-The crate is structured as a **sans-I/O core**: all protocol logic is a pure state
+While porting, the protocol behaviour was re-derived from the reference rather than
+copied, which surfaced a few improvements over it:
+
+- **Runtime-agnostic core:** The protocol logic is a pure state machine with
+  no I/O or runtime dependency. Time is passed in explicitly, datagrams are fed and
+  drained as buffers, and runtime adapters (Tokio, blocking, or your own) sit on top.
+  The reference couples the protocol to its host runtime.
+- **Sequence-wraparound fix:** The reliable-data ack-all throttle compared a truncated
+  16-bit wire sequence against a full-width counter, so after 65,536 packets the
+  throttle broke and the channel spammed acknowledgements every tick. This bug is
+  present in both the C# and Zig references; here sequences are tracked at full width
+  and truncated only on the wire.
+- **Hardened fragment reassembly:** Master-fragment parsing is guarded against hostile
+  input: short fragments no longer panic, and the attacker-controlled reassembly length
+  can no longer trigger a multi-gigabyte preallocation (both are bounded and answered
+  with a `CorruptPacket` disconnect). The reference shares this gap.
+- **Multi-packet short-circuit:** Processing a bundled multi-packet now stops as soon as
+  a sub-packet terminates the session, instead of continuing to act on later sub-packets
+  of an already-closed session.
+- **Idiomatic, defensive Rust API:** Public types implement `Debug` (with the RC4 key
+  state redacted), data-enqueue calls are `#[must_use]` so dropped payloads can't pass
+  silently, and the parse paths are exercised by an end-to-end fuzz suite and the ported
+  regression tests.
+
+## Design: an I/O-agnostic core
+
+The crate is structured as an **I/O-agnostic core**: all protocol logic is a pure state
 machine that performs no I/O and reads no clock. Time is supplied by the caller as a
 `std::time::Instant`, and bytes are handed in and out explicitly. This keeps the core
 runtime-agnostic, deterministic, and easy to test, with thin adapters layered on top
@@ -208,35 +235,6 @@ call `run_tick(now)` periodically, and flush whatever `take_outgoing()` returns 
 your own socket, reading events from `take_events()`. The `UdpTransport` trait and
 `SoeMultiplexer::drive` offer a minimal, dependency-free seam for any non-blocking UDP
 socket (with a blanket impl for `std::net::UdpSocket`).
-
-## Acknowledgements
-
-This implementation is a port informed by the public C# and Zig implementations in
-[Sanctuary.SoeProtocol](https://github.com/PS2Sanctuary/Sanctuary.SoeProtocol).
-
-While porting, the protocol behaviour was re-derived from the reference rather than
-copied, which surfaced a few improvements over it:
-
-- **Runtime-agnostic sans-I/O core.** The protocol logic is a pure state machine with
-  no I/O or runtime dependency. Time is passed in explicitly, datagrams are fed and
-  drained as buffers, and runtime adapters (Tokio, blocking, or your own) sit on top.
-  The reference couples the protocol to its host runtime.
-- **Sequence-wraparound fix.** The reliable-data ack-all throttle compared a truncated
-  16-bit wire sequence against a full-width counter, so after 65,536 packets the
-  throttle broke and the channel spammed acknowledgements every tick. This bug is
-  present in both the C# and Zig references; here sequences are tracked at full width
-  and truncated only on the wire.
-- **Hardened fragment reassembly.** Master-fragment parsing is guarded against hostile
-  input: short fragments no longer panic, and the attacker-controlled reassembly length
-  can no longer trigger a multi-gigabyte preallocation (both are bounded and answered
-  with a `CorruptPacket` disconnect). The reference shares this gap.
-- **Multi-packet short-circuit.** Processing a bundled multi-packet now stops as soon as
-  a sub-packet terminates the session, instead of continuing to act on later sub-packets
-  of an already-closed session.
-- **Idiomatic, defensive Rust API.** Public types implement `Debug` (with the RC4 key
-  state redacted), data-enqueue calls are `#[must_use]` so dropped payloads can't pass
-  silently, and the parse paths are exercised by an end-to-end fuzz suite and the ported
-  regression tests.
 
 ## License
 

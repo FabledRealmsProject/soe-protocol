@@ -1,7 +1,7 @@
 //! A synchronous, dependency-free adapter driving a [`SoeMultiplexer`] over a
 //! blocking [`std::net::UdpSocket`]. Always available; pulls in no async runtime.
 //!
-//! The sans-I/O [`SoeMultiplexer`] is runtime-agnostic; this module is a thin
+//! The I/O-agnostic [`SoeMultiplexer`] is runtime-agnostic; this module is a thin
 //! convenience layer mirroring `TokioSoeSocket` (behind the `tokio` feature) for callers who
 //! prefer a plain blocking loop. Both types implement [`SoeSocket`].
 

@@ -7,7 +7,7 @@
 //!
 //! # Design
 //!
-//! This crate is structured as a **sans-I/O core**: the protocol logic is a pure state
+//! This crate is structured as an **I/O-agnostic core**: the protocol logic is a pure state
 //! machine that never touches the network or the clock directly. [`SoeSession`] (a
 //! single connection) and [`SoeMultiplexer`] (many connections demultiplexed by remote
 //! address) consume incoming datagrams and the current [`Instant`](std::time::Instant),

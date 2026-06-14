@@ -1,7 +1,7 @@
 //! The reliable data input channel: validates, orders and reassembles incoming
 //! reliable data, decrypts/unbundles it, and emits acknowledgements.
 //!
-//! This is a sans-I/O component. Incoming packets are fed via
+//! This is an I/O-agnostic component. Incoming packets are fed via
 //! [`ReliableDataInputChannel::handle_reliable_data`] /
 //! [`ReliableDataInputChannel::handle_reliable_data_fragment`], and the channel
 //! accumulates outgoing acknowledgement packets (drained via

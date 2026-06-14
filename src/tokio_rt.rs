@@ -1,7 +1,7 @@
 //! A [Tokio](https://tokio.rs)-based async adapter driving a [`SoeMultiplexer`]
 //! over a UDP socket. Enabled by the `tokio` feature.
 //!
-//! The sans-I/O [`SoeMultiplexer`] is runtime-agnostic; this module is a thin,
+//! The I/O-agnostic [`SoeMultiplexer`] is runtime-agnostic; this module is a thin,
 //! optional convenience layer for users who want a ready-made async driver. It owns
 //! a [`tokio::net::UdpSocket`] and interleaves socket reads with periodic ticks
 //! (for heartbeats, timeouts, and reliable-data resends), flushing outgoing

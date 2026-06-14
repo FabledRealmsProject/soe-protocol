@@ -1,4 +1,4 @@
-//! The socket handler: a sans-I/O multiplexer of SOE sessions over a single UDP
+//! The socket handler: an I/O-agnostic multiplexer of SOE sessions over a single UDP
 //! socket, plus a thin, dependency-free transport adapter to drive it.
 //!
 //! This ports the reference `SoeSocketHandler`, restructured to keep the core a
@@ -113,7 +113,7 @@ pub enum SocketEvent<A> {
     },
 }
 
-/// A sans-I/O multiplexer of SOE sessions, keyed by remote address.
+/// an I/O-agnostic multiplexer of SOE sessions, keyed by remote address.
 #[derive(Debug)]
 pub struct SoeMultiplexer<A: RemoteAddr> {
     config: SocketConfig,

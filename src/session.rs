@@ -1,4 +1,4 @@
-//! The session handler: a sans-I/O state machine driving a single SOE session.
+//! The session handler: an I/O-agnostic state machine driving a single SOE session.
 //!
 //! This ports the reference `SoeProtocolHandler`, restructured as a pure state
 //! machine. Rather than owning a socket, the handler accepts incoming datagrams via
@@ -146,7 +146,7 @@ impl Lcg {
     }
 }
 
-/// A sans-I/O handler for a single SOE protocol session.
+/// an I/O-agnostic handler for a single SOE protocol session.
 #[derive(Debug)]
 pub struct SoeSession {
     mode: SessionMode,
