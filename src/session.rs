@@ -237,6 +237,11 @@ impl SoeSession {
         self.session_id
     }
 
+    /// Returns the negotiated CRC seed (meaningful once running).
+    pub fn crc_seed(&self) -> u32 {
+        self.params.crc_seed
+    }
+
     /// Returns the reason the session terminated (meaningful once terminated).
     pub fn termination_reason(&self) -> DisconnectReason {
         self.termination_reason

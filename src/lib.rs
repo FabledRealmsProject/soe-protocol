@@ -18,6 +18,7 @@ pub mod packets;
 pub mod protocol;
 pub mod rc4;
 pub mod session;
+pub mod socket;
 pub mod varint;
 pub mod zlib;
 
@@ -26,3 +27,4 @@ pub use protocol::{DisconnectReason, OpCode};
 pub use session::{
     ApplicationParameters, SessionEvent, SessionMode, SessionParameters, SessionState, SoeSession,
 };
+pub use socket::{RemoteAddr, SocketConfig, SocketEvent, SoeMultiplexer, UdpTransport};
