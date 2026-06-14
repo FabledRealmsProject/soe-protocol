@@ -17,8 +17,12 @@ pub mod packet_utils;
 pub mod packets;
 pub mod protocol;
 pub mod rc4;
+pub mod session;
 pub mod varint;
 pub mod zlib;
 
 pub use error::{Error, Result};
 pub use protocol::{DisconnectReason, OpCode};
+pub use session::{
+    ApplicationParameters, SessionEvent, SessionMode, SessionParameters, SessionState, SoeSession,
+};

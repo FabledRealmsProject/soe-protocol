@@ -137,6 +137,12 @@ impl ReliableDataOutputChannel {
         self.dispatch_queue.len()
     }
 
+    /// Sets the maximum length of the data portion (sequence + data) of a single
+    /// packet. Should not be called after data has been enqueued.
+    pub fn set_max_data_length(&mut self, max_data_length: usize) {
+        self.config.max_data_length = max_data_length;
+    }
+
     fn max_chunk(&self) -> usize {
         self.config.max_data_length - SEQUENCE_SIZE
     }
