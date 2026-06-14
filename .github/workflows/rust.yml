@@ -1,0 +1,51 @@
+name: Build and Check
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - .github/workflows/rust.yml
+      - src/**
+      - Cargo.toml
+      - Cargo.lock
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - .github/workflows/rust.yml
+      - src/**
+      - Cargo.toml
+      - Cargo.lock
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  read_msrv:
+    name: Read MSRV
+    uses: actions-rust-lang/msrv/.github/workflows/msrv.yml@main
+
+  build_and_test:
+    name: Build and test
+    needs: read_msrv
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: "stable, ${{ needs.read_msrv.outputs.msrv }}"
+      - run: cargo build --features tokio --verbose
+      - run: cargo test --features tokio
+
+  formatting:
+    name: Check formatting
+    needs: read_msrv
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: "stable, ${{ needs.read_msrv.outputs.msrv }}"
+          components: rustfmt
+      - name: Rustfmt Check
+        uses: actions-rust-lang/rustfmt@v1
