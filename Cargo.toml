@@ -11,3 +11,18 @@ license = "GPL-3.0-or-later"
 bytes = "1.11.1"
 flate2 = "1.1.9"
 thiserror = "2.0.18"
+tokio = { version = "1", features = ["net", "rt", "time"], optional = true }
+
+[features]
+tokio = ["dep:tokio"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["net", "rt", "rt-multi-thread", "time", "macros"] }
+
+[[example]]
+name = "server"
+required-features = ["tokio"]
+
+[[example]]
+name = "client"
+required-features = ["tokio"]

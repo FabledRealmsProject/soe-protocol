@@ -19,6 +19,8 @@ pub mod protocol;
 pub mod rc4;
 pub mod session;
 pub mod socket;
+#[cfg(feature = "tokio")]
+pub mod tokio_rt;
 pub mod varint;
 pub mod zlib;
 
