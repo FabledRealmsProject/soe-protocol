@@ -529,6 +529,13 @@ impl SoeSession {
                     };
                     self.handle_contextual_inner(sub_op, sub.slice(OP_CODE_SIZE..), now);
                     offset += len;
+
+                    // A sub-packet may have terminated the session (e.g. a corrupt
+                    // fragment or an embedded Disconnect). Stop draining the bundle
+                    // rather than processing data on a dead session.
+                    if self.state == SessionState::Terminated {
+                        return;
+                    }
                 }
             }
             OpCode::Disconnect => {
@@ -808,6 +815,45 @@ mod tests {
 
         assert_eq!(&server.take_received()[0][..], &to_server[..]);
         assert_eq!(&client.take_received()[0][..], &to_client[..]);
+    }
+
+    /// A `MultiPacket` bundle whose first sub-packet corrupts the session must not
+    /// have its remaining sub-packets processed: once a sub-packet terminates the
+    /// session, the bundle loop short-circuits rather than delivering data on a dead
+    /// session.
+    #[test]
+    fn multi_packet_stops_after_sub_packet_terminates() {
+        let now = Instant::now();
+        let (_client, mut server) = negotiate(now);
+        assert_eq!(server.state(), SessionState::Running);
+
+        // Build a MultiPacket body with two sub-packets:
+        //   1. a corrupt master ReliableDataFragment (only 2 of the required 4
+        //      total-length bytes) -> terminates the session as CorruptPacket;
+        //   2. an otherwise-valid ReliableData carrying "hi".
+        // Each sub-packet is `[length][op-code (2 BE)][sub-payload]`; lengths < 256
+        // encode as a single byte.
+        let mut body = Vec::new();
+
+        // Sub-packet 1: ReliableDataFragment, sequence 0, truncated length prefix.
+        let sub1 = [0x00, 0x0D, 0x00, 0x00, 0xAB, 0xCD];
+        body.push(sub1.len() as u8);
+        body.extend_from_slice(&sub1);
+
+        // Sub-packet 2: ReliableData, sequence 0, payload "hi".
+        let sub2 = [0x00, 0x09, 0x00, 0x00, b'h', b'i'];
+        body.push(sub2.len() as u8);
+        body.extend_from_slice(&sub2);
+
+        server.handle_contextual_inner(OpCode::MultiPacket, Bytes::from(body), now);
+
+        assert_eq!(server.state(), SessionState::Terminated);
+        assert_eq!(server.termination_reason(), DisconnectReason::CorruptPacket);
+        // The second sub-packet must never have reached the input channel.
+        assert!(
+            server.input.take_app_data().is_empty(),
+            "data after a terminating sub-packet was processed"
+        );
     }
 
     #[test]
