@@ -143,21 +143,21 @@ pub fn packet_minimum_length(op: OpCode, is_compression_enabled: bool, crc_lengt
 /// back-to-back sub-packets, each prefixed by its length as a MultiPacket varint.
 pub mod multi {
     use super::*;
+    use crate::io::{BinaryReader, BinaryWriter};
 
     /// Iterates the sub-packets within a MultiPacket payload (excluding the
     /// MultiPacket's own OP code).
     pub fn unpack(payload: &[u8]) -> Result<Vec<&[u8]>> {
         let mut out = Vec::new();
-        let mut offset = 0usize;
-        while offset < payload.len() {
-            let len = multi_packet::read(payload, &mut offset)? as usize;
-            if len < OP_CODE_SIZE || len > payload.len() - offset {
+        let mut reader = BinaryReader::new(payload);
+        while reader.remaining() > 0 {
+            let len = multi_packet::read(&mut reader)? as usize;
+            if len < OP_CODE_SIZE || len > reader.remaining() {
                 return Err(Error::OutOfRange(format!(
                     "invalid multi-packet sub-packet length {len}"
                 )));
             }
-            out.push(&payload[offset..offset + len]);
-            offset += len;
+            out.push(reader.read_bytes(len)?);
         }
         Ok(out)
     }
@@ -174,19 +174,12 @@ pub mod multi {
     /// Packs `sub_packets` into `buffer` as a MultiPacket payload (excluding the
     /// MultiPacket's own OP code), returning the number of bytes written.
     pub fn pack(sub_packets: &[&[u8]], buffer: &mut [u8]) -> Result<usize> {
-        let mut offset = 0usize;
+        let mut writer = BinaryWriter::new(buffer);
         for packet in sub_packets {
-            multi_packet::write(buffer, packet.len() as u32, &mut offset)?;
-            if offset + packet.len() > buffer.len() {
-                return Err(Error::BufferTooShort {
-                    needed: offset + packet.len(),
-                    available: buffer.len(),
-                });
-            }
-            buffer[offset..offset + packet.len()].copy_from_slice(packet);
-            offset += packet.len();
+            multi_packet::write(&mut writer, packet.len() as u32)?;
+            writer.write_bytes(packet)?;
         }
-        Ok(offset)
+        Ok(writer.offset())
     }
 }
 

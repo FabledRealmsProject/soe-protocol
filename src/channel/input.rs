@@ -11,7 +11,10 @@
 
 use std::time::{Duration, Instant};
 
+use bytes::{Bytes, BytesMut};
+
 use crate::constants::MULTI_DATA_INDICATOR;
+use crate::io::BinaryReader;
 use crate::protocol::OpCode;
 use crate::rc4::Rc4KeyState;
 use crate::varint::data_bundle;
@@ -44,8 +47,6 @@ pub struct InputConfig {
     pub data_ack_window: u16,
     /// Maximum delay before acknowledging incoming reliable data sequences.
     pub max_ack_delay: Duration,
-    /// Whether the proxied application data is encrypted with RC4.
-    pub is_encryption_enabled: bool,
 }
 
 impl Default for InputConfig {
@@ -55,23 +56,23 @@ impl Default for InputConfig {
             acknowledge_all_data: false,
             data_ack_window: 32,
             max_ack_delay: Duration::from_millis(2),
-            is_encryption_enabled: false,
         }
     }
 }
 
 /// A contextual packet the channel wishes to send (without OP code or CRC framing,
-/// which the session layer applies).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// which the session layer applies). For this channel it is always an acknowledgement
+/// carrying a single sequence number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OutgoingContextual {
-    /// The OP code of the packet.
+    /// The OP code of the packet ([`OpCode::Acknowledge`] or [`OpCode::AcknowledgeAll`]).
     pub op_code: OpCode,
-    /// The packet payload (sans OP code and CRC).
-    pub payload: Vec<u8>,
+    /// The acknowledged sequence number.
+    pub sequence: u16,
 }
 
 struct Stashed {
-    data: Vec<u8>,
+    data: Bytes,
     is_fragment: bool,
 }
 
@@ -84,7 +85,7 @@ pub struct ReliableDataInputChannel {
     window_start_sequence: i64,
 
     /// Buffer accumulating fragments of the current data unit.
-    current_buffer: Option<Vec<u8>>,
+    current_buffer: Option<BytesMut>,
     /// The expected total length of the current data unit.
     expected_data_length: usize,
 
@@ -96,18 +97,16 @@ pub struct ReliableDataInputChannel {
     stats: DataInputStats,
 
     outgoing: Vec<OutgoingContextual>,
-    app_data: Vec<Vec<u8>>,
+    app_data: Vec<Bytes>,
 }
 
 impl ReliableDataInputChannel {
-    /// Creates a new input channel. `cipher` is the initial RC4 key state, required
-    /// only if `config.is_encryption_enabled` is set.
+    /// Creates a new input channel. `cipher` is the initial RC4 key state; pass
+    /// `Some(..)` to enable RC4 decryption of the proxied application data, or
+    /// `None` to pass it through unencrypted.
     pub fn new(config: InputConfig, cipher: Option<Rc4KeyState>, now: Instant) -> Self {
         let capacity = config.max_queued_incoming as usize;
-        let mut stash = Vec::with_capacity(capacity);
-        for _ in 0..capacity {
-            stash.push(None);
-        }
+        let stash = std::iter::repeat_with(|| None).take(capacity).collect();
 
         Self {
             config,
@@ -135,7 +134,7 @@ impl ReliableDataInputChannel {
     }
 
     /// Drains the decoded application data buffers accumulated so far.
-    pub fn take_app_data(&mut self) -> Vec<Vec<u8>> {
+    pub fn take_app_data(&mut self) -> Vec<Bytes> {
         std::mem::take(&mut self.app_data)
     }
 
@@ -162,18 +161,18 @@ impl ReliableDataInputChannel {
     }
 
     /// Handles a [`OpCode::ReliableData`] packet (OP code already stripped).
-    pub fn handle_reliable_data(&mut self, data: &[u8], now: Instant) {
-        if !self.preprocess(data, false, now) {
+    pub fn handle_reliable_data(&mut self, data: Bytes, now: Instant) {
+        if !self.preprocess(&data, false, now) {
             return;
         }
-        self.process_data(&data[2..]);
+        self.process_data(data.slice(2..));
         self.window_start_sequence += 1;
         self.consume_stashed();
     }
 
     /// Handles a [`OpCode::ReliableDataFragment`] packet (OP code already stripped).
-    pub fn handle_reliable_data_fragment(&mut self, data: &[u8], now: Instant) {
-        if !self.preprocess(data, true, now) {
+    pub fn handle_reliable_data_fragment(&mut self, data: Bytes, now: Instant) {
+        if !self.preprocess(&data, true, now) {
             return;
         }
         self.write_immediate_fragment(&data[2..]);
@@ -183,10 +182,7 @@ impl ReliableDataInputChannel {
     }
 
     fn emit(&mut self, op_code: OpCode, sequence: u16) {
-        self.outgoing.push(OutgoingContextual {
-            op_code,
-            payload: sequence.to_be_bytes().to_vec(),
-        });
+        self.outgoing.push(OutgoingContextual { op_code, sequence });
     }
 
     fn send_ack_all(&mut self, sequence: u16, now: Instant) {
@@ -198,7 +194,7 @@ impl ReliableDataInputChannel {
 
     /// Validates and, if necessary, stashes incoming reliable data. Returns `true`
     /// if the data (with its sequence stripped) should be processed immediately.
-    fn preprocess(&mut self, data: &[u8], is_fragment: bool, now: Instant) -> bool {
+    fn preprocess(&mut self, data: &Bytes, is_fragment: bool, now: Instant) -> bool {
         self.stats.total_received += 1;
 
         let (sequence, packet_sequence) = match self.is_valid_reliable_data(data, now) {
@@ -226,7 +222,7 @@ impl ReliableDataInputChannel {
         }
 
         self.stash[spot] = Some(Stashed {
-            data: data[2..].to_vec(),
+            data: data.slice(2..),
             is_fragment,
         });
         false
@@ -271,7 +267,7 @@ impl ReliableDataInputChannel {
         } else {
             let expected = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
             self.expected_data_length = expected;
-            let mut buf = Vec::with_capacity(expected);
+            let mut buf = BytesMut::with_capacity(expected);
             buf.extend_from_slice(&data[4..]);
             self.current_buffer = Some(buf);
         }
@@ -283,7 +279,7 @@ impl ReliableDataInputChannel {
             return;
         }
         let buf = self.current_buffer.take().unwrap();
-        self.process_data(&buf);
+        self.process_data(buf.freeze());
         self.expected_data_length = 0;
     }
 
@@ -298,49 +294,51 @@ impl ReliableDataInputChannel {
                 self.write_immediate_fragment(&item.data);
                 self.try_process_current_buffer();
             } else {
-                self.process_data(&item.data);
+                self.process_data(item.data);
             }
 
             self.window_start_sequence += 1;
         }
     }
 
-    fn process_data(&mut self, data: &[u8]) {
+    fn process_data(&mut self, data: Bytes) {
         if data.len() > 2 && data[0..2] == MULTI_DATA_INDICATOR {
-            let mut offset = 2usize;
-            while offset < data.len() {
-                let len = match data_bundle::read(data, &mut offset) {
+            let mut reader = BinaryReader::new(&data);
+            // Skip the multi-data indicator.
+            if reader.skip(2).is_err() {
+                return;
+            }
+            while reader.remaining() > 0 {
+                let len = match data_bundle::read(&mut reader) {
                     Ok(l) => l as usize,
                     Err(_) => break,
                 };
-                if offset + len > data.len() {
+                let start = reader.offset();
+                if reader.skip(len).is_err() {
                     break;
                 }
-                let chunk = data[offset..offset + len].to_vec();
-                self.decrypt_and_handle(&chunk);
-                offset += len;
+                let chunk = data.slice(start..start + len);
+                self.decrypt_and_handle(chunk);
             }
         } else {
             self.decrypt_and_handle(data);
         }
     }
 
-    fn decrypt_and_handle(&mut self, data: &[u8]) {
-        let processed = if self.config.is_encryption_enabled {
-            // A single leading 0x00 byte may pad encrypted data; ignore it.
-            let d = if data.len() > 1 && data[0] == 0 {
-                &data[1..]
-            } else {
-                data
-            };
-            let mut buf = d.to_vec();
-            self.cipher
-                .as_mut()
-                .expect("encryption enabled without a key state")
-                .transform_in_place(&mut buf);
-            buf
-        } else {
-            data.to_vec()
+    fn decrypt_and_handle(&mut self, data: Bytes) {
+        let processed = match &mut self.cipher {
+            Some(cipher) => {
+                // A single leading 0x00 byte may pad encrypted data; ignore it.
+                let d = if data.len() > 1 && data[0] == 0 {
+                    data.slice(1..)
+                } else {
+                    data
+                };
+                let mut buf = BytesMut::from(&d[..]);
+                cipher.transform_in_place(&mut buf);
+                buf.freeze()
+            }
+            None => data,
         };
 
         self.stats.total_received_bytes += processed.len() as u64;
@@ -408,8 +406,7 @@ mod tests {
             OpCode::Acknowledge
         };
         assert_eq!(ack.op_code, expected_op);
-        let seq = u16::from_be_bytes([ack.payload[0], ack.payload[1]]);
-        assert_eq!(seq, expected_sequence);
+        assert_eq!(ack.sequence, expected_sequence);
     }
 
     const DATA_LENGTH: usize = 16;
@@ -427,15 +424,15 @@ mod tests {
         let (f1, d1) = data_fragment(1, None, DATA_LENGTH);
         let (f2, d2) = data_fragment(2, None, DATA_LENGTH);
 
-        ch.handle_reliable_data_fragment(&f0, clock.tick());
+        ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f0), clock.tick());
         assert_pop_ack(&mut ch, &mut clock, &mut pending, 0, !ack_all);
         assert!(ch.take_app_data().is_empty());
 
-        ch.handle_reliable_data_fragment(&f1, clock.tick());
+        ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f1), clock.tick());
         assert_pop_ack(&mut ch, &mut clock, &mut pending, 1, !ack_all);
         assert!(ch.take_app_data().is_empty());
 
-        ch.handle_reliable_data_fragment(&f2, clock.tick());
+        ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f2), clock.tick());
         assert_pop_ack(&mut ch, &mut clock, &mut pending, 2, !ack_all);
         let app = ch.take_app_data();
         assert_eq!(app.len(), 1);
@@ -462,14 +459,14 @@ mod tests {
         let (f1, d1) = data_fragment(1, None, DATA_LENGTH);
         let (f2, d2) = data_fragment(2, None, DATA_LENGTH);
 
-        ch.handle_reliable_data_fragment(&f2, clock.tick());
+        ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f2), clock.tick());
         assert_pop_ack(&mut ch, &mut clock, &mut pending, 2, false);
 
-        ch.handle_reliable_data_fragment(&f0, clock.tick());
+        ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f0), clock.tick());
         assert_pop_ack(&mut ch, &mut clock, &mut pending, 0, !ack_all);
         assert!(ch.take_app_data().is_empty());
 
-        ch.handle_reliable_data_fragment(&f1, clock.tick());
+        ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f1), clock.tick());
         assert_pop_ack(&mut ch, &mut clock, &mut pending, if ack_all { 1 } else { 2 }, !ack_all);
         let app = ch.take_app_data();
         assert_eq!(app.len(), 1);
@@ -496,15 +493,15 @@ mod tests {
         let (p1, d1) = data_fragment(1, None, DATA_LENGTH);
         let (p2, d2) = data_fragment(2, None, DATA_LENGTH);
 
-        ch.handle_reliable_data(&p0, clock.tick());
+        ch.handle_reliable_data(Bytes::copy_from_slice(&p0), clock.tick());
         assert_pop_ack(&mut ch, &mut clock, &mut pending, 0, !ack_all);
         let app = ch.take_app_data();
         assert_eq!(app, vec![d0]);
 
-        ch.handle_reliable_data(&p2, clock.tick());
+        ch.handle_reliable_data(Bytes::copy_from_slice(&p2), clock.tick());
         assert_pop_ack(&mut ch, &mut clock, &mut pending, 2, false);
 
-        ch.handle_reliable_data(&p1, clock.tick());
+        ch.handle_reliable_data(Bytes::copy_from_slice(&p1), clock.tick());
         assert_pop_ack(&mut ch, &mut clock, &mut pending, if ack_all { 1 } else { 2 }, !ack_all);
         let app = ch.take_app_data();
         assert_eq!(app, vec![d1, d2]);
@@ -527,22 +524,22 @@ mod tests {
         let (f2, d2) = data_fragment(2, Some((DATA_LENGTH * 2) as u32), DATA_LENGTH);
         let (f3, d3) = data_fragment(3, None, DATA_LENGTH);
 
-        ch.handle_reliable_data_fragment(&f0, clock.tick());
+        ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f0), clock.tick());
         assert_pop_ack(&mut ch, &mut clock, &mut pending, 0, !ack_all);
         assert!(ch.take_app_data().is_empty());
 
-        ch.handle_reliable_data_fragment(&f1, clock.tick());
+        ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f1), clock.tick());
         assert_pop_ack(&mut ch, &mut clock, &mut pending, 1, !ack_all);
         let app = ch.take_app_data();
         assert_eq!(app.len(), 1);
         assert_eq!(&app[0][..DATA_LENGTH], &d0[..]);
         assert_eq!(&app[0][DATA_LENGTH..], &d1[..]);
 
-        ch.handle_reliable_data_fragment(&f3, clock.tick());
+        ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f3), clock.tick());
         assert_pop_ack(&mut ch, &mut clock, &mut pending, 3, false);
         assert!(ch.take_app_data().is_empty());
 
-        ch.handle_reliable_data_fragment(&f2, clock.tick());
+        ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f2), clock.tick());
         assert_pop_ack(&mut ch, &mut clock, &mut pending, if ack_all { 2 } else { 3 }, !ack_all);
         let app = ch.take_app_data();
         assert_eq!(app.len(), 1);
@@ -565,12 +562,12 @@ mod tests {
         let (f1, d1) = data_fragment(1, Some((DATA_LENGTH * 2) as u32), DATA_LENGTH);
         let (f2, d2) = data_fragment(2, None, DATA_LENGTH);
 
-        ch.handle_reliable_data_fragment(&f1, clock.tick());
-        ch.handle_reliable_data_fragment(&f2, clock.tick());
+        ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f1), clock.tick());
+        ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f2), clock.tick());
         assert_pop_ack(&mut ch, &mut clock, &mut pending, 1, false);
         assert_pop_ack(&mut ch, &mut clock, &mut pending, 2, false);
 
-        ch.handle_reliable_data(&p0, clock.tick());
+        ch.handle_reliable_data(Bytes::copy_from_slice(&p0), clock.tick());
         assert_pop_ack(&mut ch, &mut clock, &mut pending, if ack_all { 0 } else { 2 }, !ack_all);
 
         let app = ch.take_app_data();
@@ -591,26 +588,19 @@ mod tests {
         let mut ch = new_channel(&clock, ack_all);
         let mut pending: Vec<OutgoingContextual> = Vec::new();
 
-        // [seq u16][00 19][len=1][2][len=1][4]
+        // [seq u16][00 19][len=1][2][len=1][4]. A data-bundle length of 1 encodes
+        // as a single 0x01 byte.
         let mut multi = vec![0u8, 0]; // sequence 0
         multi.extend_from_slice(&MULTI_DATA_INDICATOR);
-        let mut off = multi.len();
-        multi.resize(multi.len() + 4, 0);
-        data_bundle::write(&mut multi[..], 1, &mut off).unwrap();
-        multi.truncate(off);
-        multi.push(2);
-        let mut off2 = multi.len();
-        multi.resize(multi.len() + 4, 0);
-        data_bundle::write(&mut multi[..], 1, &mut off2).unwrap();
-        multi.truncate(off2);
-        multi.push(4);
+        multi.extend_from_slice(&[1, 2]); // length 1, data byte 2
+        multi.extend_from_slice(&[1, 4]); // length 1, data byte 4
 
-        ch.handle_reliable_data(&multi, clock.tick());
+        ch.handle_reliable_data(Bytes::copy_from_slice(&multi), clock.tick());
         assert_pop_ack(&mut ch, &mut clock, &mut pending, 0, !ack_all);
         assert_eq!(ch.take_app_data(), vec![vec![2u8], vec![4u8]]);
 
         multi[1] = 0x01; // increment sequence to 1
-        ch.handle_reliable_data(&multi, clock.tick());
+        ch.handle_reliable_data(Bytes::copy_from_slice(&multi), clock.tick());
         assert_pop_ack(&mut ch, &mut clock, &mut pending, 1, !ack_all);
         assert_eq!(ch.take_app_data(), vec![vec![2u8], vec![4u8]]);
     }

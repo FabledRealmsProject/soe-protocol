@@ -29,6 +29,21 @@ impl<'a> BinaryReader<'a> {
         self.data.len() - self.offset
     }
 
+    /// Returns the byte `ahead` positions past the current offset without
+    /// advancing, or `None` if it is out of range.
+    pub fn peek(&self, ahead: usize) -> Option<u8> {
+        self.data.get(self.offset + ahead).copied()
+    }
+
+    /// Advances the read offset by `len` bytes without returning them.
+    ///
+    /// Returns [`Error::BufferTooShort`] if fewer than `len` bytes remain.
+    pub fn skip(&mut self, len: usize) -> Result<()> {
+        self.ensure(len)?;
+        self.offset += len;
+        Ok(())
+    }
+
     /// Returns the underlying slice.
     pub fn data(&self) -> &'a [u8] {
         self.data

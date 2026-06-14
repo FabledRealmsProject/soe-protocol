@@ -13,57 +13,18 @@
 //! bytes (`0xFF 0xFF 0xFF` + big-endian `u32`).
 
 use crate::error::{Error, Result};
+use crate::io::{BinaryReader, BinaryWriter};
 
-fn read_u16_be(data: &[u8], offset: usize) -> Result<u16> {
-    if offset + 2 > data.len() {
-        return Err(Error::BufferTooShort {
-            needed: 2,
-            available: data.len().saturating_sub(offset),
-        });
-    }
-    Ok(u16::from_be_bytes([data[offset], data[offset + 1]]))
-}
-
-fn read_u32_be(data: &[u8], offset: usize) -> Result<u32> {
-    if offset + 4 > data.len() {
-        return Err(Error::BufferTooShort {
-            needed: 4,
-            available: data.len().saturating_sub(offset),
-        });
-    }
-    Ok(u32::from_be_bytes([
-        data[offset],
-        data[offset + 1],
-        data[offset + 2],
-        data[offset + 3],
-    ]))
-}
-
-fn ensure(buffer: &[u8], offset: usize, needed: usize) -> Result<()> {
-    if offset + needed > buffer.len() {
-        return Err(Error::BufferTooShort {
-            needed,
-            available: buffer.len().saturating_sub(offset),
-        });
-    }
-    Ok(())
-}
-
-fn write_multibyte(buffer: &mut [u8], length: u32, offset: &mut usize) -> Result<()> {
+fn write_multibyte(writer: &mut BinaryWriter, length: u32) -> Result<()> {
     if length < 0xFFFF {
-        ensure(buffer, *offset, 3)?;
-        buffer[*offset] = 0xFF;
-        buffer[*offset + 1..*offset + 3].copy_from_slice(&(length as u16).to_be_bytes());
-        *offset += 3;
+        writer.write_u8(0xFF)?;
+        writer.write_u16(length as u16)
     } else {
-        ensure(buffer, *offset, 7)?;
-        buffer[*offset] = 0xFF;
-        buffer[*offset + 1] = 0xFF;
-        buffer[*offset + 2] = 0xFF;
-        buffer[*offset + 3..*offset + 7].copy_from_slice(&length.to_be_bytes());
-        *offset += 7;
+        writer.write_u8(0xFF)?;
+        writer.write_u8(0xFF)?;
+        writer.write_u8(0xFF)?;
+        writer.write_u32(length)
     }
-    Ok(())
 }
 
 /// The MultiPacket variable-length integer scheme (Appendix B).
@@ -81,46 +42,36 @@ pub mod multi_packet {
         }
     }
 
-    /// Reads a variable-length value at `*offset`, advancing it past the value.
-    pub fn read(data: &[u8], offset: &mut usize) -> Result<u32> {
-        let o = *offset;
-        if o >= data.len() {
-            return Err(Error::BufferTooShort {
-                needed: 1,
-                available: 0,
-            });
-        }
+    /// Reads a variable-length value from `reader`, advancing it past the value.
+    pub fn read(reader: &mut BinaryReader) -> Result<u32> {
+        let b0 = reader.peek(0).ok_or(Error::BufferTooShort {
+            needed: 1,
+            available: 0,
+        })?;
 
-        if data[o] < 0xFF {
-            *offset += 1;
-            Ok(data[o] as u32)
-        } else if o + 1 < data.len() && data[o + 1] == 0 {
+        if b0 < 0xFF {
+            reader.skip(1)?;
+            Ok(b0 as u32)
+        } else if reader.peek(1) == Some(0) {
             // The implied 0x00 in front of all core OP codes (big endian) signals a
             // single-byte length value of 0xFF.
-            *offset += 1;
-            Ok(data[o] as u32)
-        } else if o + 2 < data.len() && data[o + 1] == 0xFF && data[o + 2] == 0xFF {
-            *offset += 3;
-            let v = read_u32_be(data, *offset)?;
-            *offset += 4;
-            Ok(v)
+            reader.skip(1)?;
+            Ok(0xFF)
+        } else if reader.peek(1) == Some(0xFF) && reader.peek(2) == Some(0xFF) {
+            reader.skip(3)?;
+            Ok(reader.read_u32()?)
         } else {
-            *offset += 1;
-            let v = read_u16_be(data, *offset)?;
-            *offset += 2;
-            Ok(v as u32)
+            reader.skip(1)?;
+            Ok(reader.read_u16()? as u32)
         }
     }
 
-    /// Writes a variable-length value at `*offset`, advancing it past the value.
-    pub fn write(buffer: &mut [u8], length: u32, offset: &mut usize) -> Result<()> {
+    /// Writes a variable-length value to `writer`, advancing it past the value.
+    pub fn write(writer: &mut BinaryWriter, length: u32) -> Result<()> {
         if length <= 0xFF {
-            ensure(buffer, *offset, 1)?;
-            buffer[*offset] = length as u8;
-            *offset += 1;
-            Ok(())
+            writer.write_u8(length as u8)
         } else {
-            write_multibyte(buffer, length, offset)
+            write_multibyte(writer, length)
         }
     }
 }
@@ -140,41 +91,31 @@ pub mod data_bundle {
         }
     }
 
-    /// Reads a variable-length value at `*offset`, advancing it past the value.
-    pub fn read(data: &[u8], offset: &mut usize) -> Result<u32> {
-        let o = *offset;
-        if o >= data.len() {
-            return Err(Error::BufferTooShort {
-                needed: 1,
-                available: 0,
-            });
-        }
+    /// Reads a variable-length value from `reader`, advancing it past the value.
+    pub fn read(reader: &mut BinaryReader) -> Result<u32> {
+        let b0 = reader.peek(0).ok_or(Error::BufferTooShort {
+            needed: 1,
+            available: 0,
+        })?;
 
-        if data[o] < 0xFF {
-            *offset += 1;
-            Ok(data[o] as u32)
-        } else if o + 2 < data.len() && data[o + 1] == 0xFF && data[o + 2] == 0xFF {
-            *offset += 3;
-            let v = read_u32_be(data, *offset)?;
-            *offset += 4;
-            Ok(v)
+        if b0 < 0xFF {
+            reader.skip(1)?;
+            Ok(b0 as u32)
+        } else if reader.peek(1) == Some(0xFF) && reader.peek(2) == Some(0xFF) {
+            reader.skip(3)?;
+            Ok(reader.read_u32()?)
         } else {
-            *offset += 1;
-            let v = read_u16_be(data, *offset)?;
-            *offset += 2;
-            Ok(v as u32)
+            reader.skip(1)?;
+            Ok(reader.read_u16()? as u32)
         }
     }
 
-    /// Writes a variable-length value at `*offset`, advancing it past the value.
-    pub fn write(buffer: &mut [u8], length: u32, offset: &mut usize) -> Result<()> {
+    /// Writes a variable-length value to `writer`, advancing it past the value.
+    pub fn write(writer: &mut BinaryWriter, length: u32) -> Result<()> {
         if length < 0xFF {
-            ensure(buffer, *offset, 1)?;
-            buffer[*offset] = length as u8;
-            *offset += 1;
-            Ok(())
+            writer.write_u8(length as u8)
         } else {
-            write_multibyte(buffer, length, offset)
+            write_multibyte(writer, length)
         }
     }
 }
@@ -205,13 +146,14 @@ mod tests {
     fn data_bundle_round_trip() {
         for &len in &[0u32, 1, 0xFE, 0xFF, 0x100, 0xFFFE, 0xFFFF, 0x1_0000, 0xFFFF_FFFF] {
             let mut buf = [0u8; 8];
-            let mut wo = 0usize;
-            data_bundle::write(&mut buf, len, &mut wo).unwrap();
-            assert_eq!(wo, data_bundle::encoded_size(len), "size len={len:#x}");
-            let mut ro = 0usize;
-            let got = data_bundle::read(&buf, &mut ro).unwrap();
+            let mut w = BinaryWriter::new(&mut buf);
+            data_bundle::write(&mut w, len).unwrap();
+            let written = w.offset();
+            assert_eq!(written, data_bundle::encoded_size(len), "size len={len:#x}");
+            let mut r = BinaryReader::new(&buf);
+            let got = data_bundle::read(&mut r).unwrap();
             assert_eq!(got, len, "len={len:#x}");
-            assert_eq!(ro, wo);
+            assert_eq!(r.offset(), written);
         }
     }
 
@@ -221,25 +163,26 @@ mod tests {
         // sub-packet OP code); the buffer is zero-initialized so this holds.
         for &len in &[0u32, 1, 0xFE, 0xFF, 0x100, 0xFFFE, 0xFFFF, 0x1_0000, 0xFFFF_FFFF] {
             let mut buf = [0u8; 9];
-            let mut wo = 0usize;
-            multi_packet::write(&mut buf, len, &mut wo).unwrap();
-            assert_eq!(wo, multi_packet::encoded_size(len), "size len={len:#x}");
-            let mut ro = 0usize;
-            let got = multi_packet::read(&buf, &mut ro).unwrap();
+            let mut w = BinaryWriter::new(&mut buf);
+            multi_packet::write(&mut w, len).unwrap();
+            let written = w.offset();
+            assert_eq!(written, multi_packet::encoded_size(len), "size len={len:#x}");
+            let mut r = BinaryReader::new(&buf);
+            let got = multi_packet::read(&mut r).unwrap();
             assert_eq!(got, len, "len={len:#x}");
-            assert_eq!(ro, wo);
+            assert_eq!(r.offset(), written);
         }
     }
 
     #[test]
     fn multi_packet_single_byte_ff() {
         let mut buf = [0u8; 4];
-        let mut wo = 0usize;
-        multi_packet::write(&mut buf, 0xFF, &mut wo).unwrap();
-        assert_eq!(wo, 1);
+        let mut w = BinaryWriter::new(&mut buf);
+        multi_packet::write(&mut w, 0xFF).unwrap();
+        assert_eq!(w.offset(), 1);
         assert_eq!(buf[0], 0xFF);
-        let mut ro = 0usize;
-        assert_eq!(multi_packet::read(&buf, &mut ro).unwrap(), 0xFF);
-        assert_eq!(ro, 1);
+        let mut r = BinaryReader::new(&buf);
+        assert_eq!(multi_packet::read(&mut r).unwrap(), 0xFF);
+        assert_eq!(r.offset(), 1);
     }
 }
