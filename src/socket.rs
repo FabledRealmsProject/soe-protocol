@@ -211,16 +211,21 @@ impl<A: RemoteAddr> SoeMultiplexer<A> {
     /// data channels. Terminated sessions are removed (after their final events are
     /// surfaced).
     pub fn run_tick(&mut self, now: Instant) {
-        let keys: Vec<A> = self.sessions.keys().cloned().collect();
-        for key in &keys {
-            if let Some(session) = self.sessions.get_mut(key) {
-                session.run_tick(now);
-            }
-            self.drain_session(key);
-        }
-        for key in &keys {
-            self.remove_if_terminated(key);
-        }
+        // Drain directly into the multiplexer's buffers during a single retain pass,
+        // removing terminated sessions in the same sweep. Taking the buffers out of
+        // `self` lets the retain closure borrow them without conflicting with the
+        // `&mut self.sessions` retain holds.
+        let mut outgoing = std::mem::take(&mut self.outgoing);
+        let mut events = std::mem::take(&mut self.events);
+
+        self.sessions.retain(|remote, session| {
+            session.run_tick(now);
+            Self::drain_into(remote, session, &mut outgoing, &mut events);
+            session.state() != SessionState::Terminated
+        });
+
+        self.outgoing = outgoing;
+        self.events = events;
     }
 
     /// Runs a single read/tick/send step over `transport`: drains all immediately
@@ -286,25 +291,30 @@ impl<A: RemoteAddr> SoeMultiplexer<A> {
     }
 
     fn drain_session(&mut self, remote: &A) {
-        let Some(session) = self.sessions.get_mut(remote) else {
-            return;
-        };
-
-        let outgoing = session.take_outgoing();
-        let received = session.take_received();
-        let events = session.take_events();
-
-        for datagram in outgoing {
-            self.outgoing.push((remote.clone(), datagram));
+        if let Some(session) = self.sessions.get_mut(remote) {
+            Self::drain_into(remote, session, &mut self.outgoing, &mut self.events);
         }
-        for data in received {
-            self.events.push(SocketEvent::DataReceived {
+    }
+
+    /// Moves a session's pending datagrams, received data, and events into the given
+    /// multiplexer buffers, tagging each with `remote`.
+    fn drain_into(
+        remote: &A,
+        session: &mut SoeSession,
+        outgoing: &mut Vec<(A, Bytes)>,
+        events: &mut Vec<SocketEvent<A>>,
+    ) {
+        for datagram in session.take_outgoing() {
+            outgoing.push((remote.clone(), datagram));
+        }
+        for data in session.take_received() {
+            events.push(SocketEvent::DataReceived {
                 remote: remote.clone(),
                 data,
             });
         }
-        for event in events {
-            let mapped = match event {
+        for event in session.take_events() {
+            events.push(match event {
                 SessionEvent::Opened => SocketEvent::SessionOpened {
                     remote: remote.clone(),
                 },
@@ -312,8 +322,7 @@ impl<A: RemoteAddr> SoeMultiplexer<A> {
                     remote: remote.clone(),
                     reason,
                 },
-            };
-            self.events.push(mapped);
+            });
         }
     }
 
