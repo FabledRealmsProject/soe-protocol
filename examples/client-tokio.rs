@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use soe_protocol::SessionParameters;
-use soe_protocol::socket::{SocketConfig, SocketEvent};
+use soe_protocol::socket::{SocketConfig, SocketEvent, SoeSocket};
 use soe_protocol::tokio_rt::TokioSoeSocket;
 
 const APP_PROTOCOL: &str = "SoePingPong";

@@ -18,6 +18,7 @@
 
 use std::collections::HashMap;
 use std::hash::Hash;
+use std::net::SocketAddr;
 use std::time::Instant;
 
 use bytes::Bytes;
@@ -28,6 +29,34 @@ use crate::protocol::{DisconnectReason, OpCode};
 use crate::session::{
     ApplicationParameters, SessionEvent, SessionMode, SessionParameters, SessionState, SoeSession,
 };
+
+/// A driver-agnostic surface for managing SOE sessions over a UDP socket.
+///
+/// Implemented by the concrete socket drivers — [`crate::sync_rt::SyncSoeSocket`]
+/// and (with the `tokio` feature) [`crate::tokio_rt::TokioSoeSocket`] — so that
+/// application code can be written generically over the driver.
+///
+/// The I/O drive step itself differs between drivers (a blocking `step` versus an
+/// `async fn step`) and so is provided as an inherent method on each type rather
+/// than on this trait.
+pub trait SoeSocket {
+    /// Returns the local address the underlying socket is bound to.
+    fn local_addr(&self) -> std::io::Result<SocketAddr>;
+
+    /// Returns the number of active sessions.
+    fn session_count(&self) -> usize;
+
+    /// Opens a client session to `remote`. The session request is sent on the next
+    /// drive step.
+    fn connect(&mut self, remote: SocketAddr);
+
+    /// Enqueues application data to be sent reliably to `remote`. Returns `false` if
+    /// there is no running session for that address.
+    fn enqueue_data(&mut self, remote: &SocketAddr, data: &[u8]) -> bool;
+
+    /// Terminates the session with `remote`, notifying the remote party.
+    fn terminate(&mut self, remote: &SocketAddr, reason: DisconnectReason);
+}
 
 /// An address that can key a session in a [`SoeMultiplexer`].
 ///
@@ -40,7 +69,7 @@ pub trait RemoteAddr: Clone + Eq + Hash {
     fn same_host(&self, other: &Self) -> bool;
 }
 
-impl RemoteAddr for std::net::SocketAddr {
+impl RemoteAddr for SocketAddr {
     fn same_host(&self, other: &Self) -> bool {
         self.ip() == other.ip()
     }

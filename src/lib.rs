@@ -19,6 +19,7 @@ pub mod protocol;
 pub mod rc4;
 pub mod session;
 pub mod socket;
+pub mod sync_rt;
 #[cfg(feature = "tokio")]
 pub mod tokio_rt;
 pub mod varint;
@@ -29,4 +30,5 @@ pub use protocol::{DisconnectReason, OpCode};
 pub use session::{
     ApplicationParameters, SessionEvent, SessionMode, SessionParameters, SessionState, SoeSession,
 };
-pub use socket::{RemoteAddr, SocketConfig, SocketEvent, SoeMultiplexer, UdpTransport};
+pub use socket::{RemoteAddr, SocketConfig, SocketEvent, SoeMultiplexer, SoeSocket, UdpTransport};
+pub use sync_rt::SyncSoeSocket;

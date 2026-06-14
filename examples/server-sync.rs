@@ -1,18 +1,18 @@
-//! A minimal SOE echo server using only the synchronous, dependency-free
-//! `SoeMultiplexer::drive` loop over a `std::net::UdpSocket` (no async runtime).
+//! A minimal SOE echo server using the synchronous, dependency-free
+//! [`SyncSoeSocket`] driver (no async runtime).
 //!
 //! Run with: `cargo run --example server-sync -- 127.0.0.1:20260`
 //!
 //! It listens for SOE sessions and echoes any reliable data back to the sender.
 
-use std::net::{SocketAddr, UdpSocket};
-use std::time::{Duration, Instant};
+use std::net::SocketAddr;
+use std::time::Duration;
 
 use soe_protocol::SessionParameters;
-use soe_protocol::socket::{SocketConfig, SocketEvent, SoeMultiplexer};
+use soe_protocol::socket::{SocketConfig, SocketEvent, SoeSocket};
+use soe_protocol::sync_rt::SyncSoeSocket;
 
 const APP_PROTOCOL: &str = "SoePingPong";
-const TICK: Duration = Duration::from_millis(5);
 
 fn main() -> std::io::Result<()> {
     let bind_addr: SocketAddr = std::env::args()
@@ -29,15 +29,11 @@ fn main() -> std::io::Result<()> {
         ..SocketConfig::default()
     };
 
-    let mut socket = UdpSocket::bind(bind_addr)?;
-    socket.set_nonblocking(true)?;
-    let mut mux = SoeMultiplexer::<SocketAddr>::new(config);
+    let mut socket = SyncSoeSocket::bind(bind_addr, config, Duration::from_millis(5))?;
     println!("server: listening on {}", socket.local_addr()?);
 
     loop {
-        mux.drive(&mut socket, Instant::now())?;
-
-        for event in mux.take_events() {
+        for event in socket.step()? {
             match event {
                 SocketEvent::SessionOpened { remote } => {
                     println!("server: session opened with {remote}");
@@ -48,11 +44,9 @@ fn main() -> std::io::Result<()> {
                 SocketEvent::DataReceived { remote, data } => {
                     let text = String::from_utf8_lossy(&data);
                     println!("server: received {:?} from {remote}, echoing", text);
-                    mux.enqueue_data(&remote, &data);
+                    socket.enqueue_data(&remote, &data);
                 }
             }
         }
-
-        std::thread::sleep(TICK);
     }
 }

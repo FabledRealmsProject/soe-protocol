@@ -16,7 +16,7 @@ use tokio::net::UdpSocket;
 use tokio::time::{Duration, Interval, MissedTickBehavior, interval};
 
 use crate::protocol::DisconnectReason;
-use crate::socket::{SocketConfig, SocketEvent, SoeMultiplexer};
+use crate::socket::{SocketConfig, SocketEvent, SoeMultiplexer, SoeSocket};
 
 /// Buffer size for a single received datagram. SOE UDP lengths default to 512 and
 /// rarely exceed it.
@@ -62,28 +62,6 @@ impl TokioSoeSocket {
         self.socket.local_addr()
     }
 
-    /// Returns the number of active sessions.
-    pub fn session_count(&self) -> usize {
-        self.mux.session_count()
-    }
-
-    /// Opens a client session to `remote`. The session request is sent on the next
-    /// [`step`](TokioSoeSocket::step).
-    pub fn connect(&mut self, remote: SocketAddr) {
-        self.mux.connect(remote, Instant::now());
-    }
-
-    /// Enqueues application data to be sent reliably to `remote`. Returns `false` if
-    /// there is no running session for that address.
-    pub fn enqueue_data(&mut self, remote: &SocketAddr, data: &[u8]) -> bool {
-        self.mux.enqueue_data(remote, data)
-    }
-
-    /// Terminates the session with `remote`, notifying the remote party.
-    pub fn terminate(&mut self, remote: &SocketAddr, reason: DisconnectReason) {
-        self.mux.terminate(remote, reason, Instant::now());
-    }
-
     /// Performs a single drive cycle: awaits either an incoming datagram or the next
     /// tick, runs a session tick, flushes outgoing datagrams, and returns any events.
     pub async fn step(&mut self) -> io::Result<Vec<SocketEvent<SocketAddr>>> {
@@ -103,5 +81,27 @@ impl TokioSoeSocket {
         }
 
         Ok(self.mux.take_events())
+    }
+}
+
+impl SoeSocket for TokioSoeSocket {
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.socket.local_addr()
+    }
+
+    fn session_count(&self) -> usize {
+        self.mux.session_count()
+    }
+
+    fn connect(&mut self, remote: SocketAddr) {
+        self.mux.connect(remote, Instant::now());
+    }
+
+    fn enqueue_data(&mut self, remote: &SocketAddr, data: &[u8]) -> bool {
+        self.mux.enqueue_data(remote, data)
+    }
+
+    fn terminate(&mut self, remote: &SocketAddr, reason: DisconnectReason) {
+        self.mux.terminate(remote, reason, Instant::now());
     }
 }
