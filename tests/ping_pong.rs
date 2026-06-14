@@ -70,10 +70,8 @@ fn ping_pong_over_real_udp() {
                     assert_eq!(data, format!("ping {client_echoes_seen}").as_bytes());
                     client_echoes_seen += 1;
                     if client_sends < ROUNDS {
-                        client.enqueue_data(
-                            &server_addr,
-                            format!("ping {client_sends}").as_bytes(),
-                        );
+                        client
+                            .enqueue_data(&server_addr, format!("ping {client_sends}").as_bytes());
                         client_sends += 1;
                     }
                 }

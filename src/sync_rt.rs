@@ -34,7 +34,11 @@ pub struct SyncSoeSocket {
 impl SyncSoeSocket {
     /// Binds a UDP socket to `local` and prepares to drive sessions, waking at least
     /// once every `tick_period` to run housekeeping. A period of 1–10ms is typical.
-    pub fn bind(local: SocketAddr, config: SocketConfig, tick_period: Duration) -> io::Result<Self> {
+    pub fn bind(
+        local: SocketAddr,
+        config: SocketConfig,
+        tick_period: Duration,
+    ) -> io::Result<Self> {
         let socket = UdpSocket::bind(local)?;
         // A read timeout paces the loop: recv_from returns immediately on data, or
         // after the tick period so heartbeats, timeouts, and resends still run.
@@ -59,8 +63,8 @@ impl SyncSoeSocket {
             // A read timeout surfaces as WouldBlock or TimedOut depending on the
             // platform; both simply mean "no datagram this tick".
             Err(e)
-                if e.kind() == io::ErrorKind::WouldBlock
-                    || e.kind() == io::ErrorKind::TimedOut => {}
+                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {
+            }
             Err(e) => return Err(e),
         }
 

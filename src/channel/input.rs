@@ -274,7 +274,8 @@ impl ReliableDataInputChannel {
     }
 
     fn try_process_current_buffer(&mut self) {
-        let ready = matches!(&self.current_buffer, Some(buf) if buf.len() >= self.expected_data_length);
+        let ready =
+            matches!(&self.current_buffer, Some(buf) if buf.len() >= self.expected_data_length);
         if !ready {
             return;
         }
@@ -358,7 +359,9 @@ mod tests {
 
     impl Clock {
         fn new() -> Self {
-            Self { now: Instant::now() }
+            Self {
+                now: Instant::now(),
+            }
         }
         fn tick(&mut self) -> Instant {
             self.now += Duration::from_millis(1);
@@ -376,8 +379,14 @@ mod tests {
 
     /// Builds a reliable data/fragment packet body (sequence + optional complete
     /// length + data), returning (packet, data).
-    fn data_fragment(sequence: u16, complete_len: Option<u32>, data_len: usize) -> (Vec<u8>, Vec<u8>) {
-        let data: Vec<u8> = (0..data_len).map(|i| (i as u8).wrapping_mul(7).wrapping_add(sequence as u8)).collect();
+    fn data_fragment(
+        sequence: u16,
+        complete_len: Option<u32>,
+        data_len: usize,
+    ) -> (Vec<u8>, Vec<u8>) {
+        let data: Vec<u8> = (0..data_len)
+            .map(|i| (i as u8).wrapping_mul(7).wrapping_add(sequence as u8))
+            .collect();
         let mut buf = Vec::new();
         buf.extend_from_slice(&sequence.to_be_bytes());
         if let Some(cl) = complete_len {
@@ -467,7 +476,13 @@ mod tests {
         assert!(ch.take_app_data().is_empty());
 
         ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f1), clock.tick());
-        assert_pop_ack(&mut ch, &mut clock, &mut pending, if ack_all { 1 } else { 2 }, !ack_all);
+        assert_pop_ack(
+            &mut ch,
+            &mut clock,
+            &mut pending,
+            if ack_all { 1 } else { 2 },
+            !ack_all,
+        );
         let app = ch.take_app_data();
         assert_eq!(app.len(), 1);
 
@@ -502,7 +517,13 @@ mod tests {
         assert_pop_ack(&mut ch, &mut clock, &mut pending, 2, false);
 
         ch.handle_reliable_data(Bytes::copy_from_slice(&p1), clock.tick());
-        assert_pop_ack(&mut ch, &mut clock, &mut pending, if ack_all { 1 } else { 2 }, !ack_all);
+        assert_pop_ack(
+            &mut ch,
+            &mut clock,
+            &mut pending,
+            if ack_all { 1 } else { 2 },
+            !ack_all,
+        );
         let app = ch.take_app_data();
         assert_eq!(app, vec![d1, d2]);
         assert!(pending.is_empty(), "no superfluous acks");
@@ -540,7 +561,13 @@ mod tests {
         assert!(ch.take_app_data().is_empty());
 
         ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f2), clock.tick());
-        assert_pop_ack(&mut ch, &mut clock, &mut pending, if ack_all { 2 } else { 3 }, !ack_all);
+        assert_pop_ack(
+            &mut ch,
+            &mut clock,
+            &mut pending,
+            if ack_all { 2 } else { 3 },
+            !ack_all,
+        );
         let app = ch.take_app_data();
         assert_eq!(app.len(), 1);
         assert_eq!(&app[0][..DATA_LENGTH], &d2[..]);
@@ -568,7 +595,13 @@ mod tests {
         assert_pop_ack(&mut ch, &mut clock, &mut pending, 2, false);
 
         ch.handle_reliable_data(Bytes::copy_from_slice(&p0), clock.tick());
-        assert_pop_ack(&mut ch, &mut clock, &mut pending, if ack_all { 0 } else { 2 }, !ack_all);
+        assert_pop_ack(
+            &mut ch,
+            &mut clock,
+            &mut pending,
+            if ack_all { 0 } else { 2 },
+            !ack_all,
+        );
 
         let app = ch.take_app_data();
         assert_eq!(app.len(), 2);

@@ -25,9 +25,7 @@ use crate::constants::{
 use crate::crc32::Crc32;
 use crate::io::{BinaryReader, BinaryWriter};
 use crate::packet_utils::{ValidationResult, append_crc, read_op_code, validate_packet};
-use crate::packets::{
-    Acknowledge, AcknowledgeAll, Disconnect, SessionRequest, SessionResponse,
-};
+use crate::packets::{Acknowledge, AcknowledgeAll, Disconnect, SessionRequest, SessionResponse};
 use crate::protocol::{DisconnectReason, OpCode};
 use crate::rc4::Rc4KeyState;
 use crate::varint::multi_packet;
@@ -430,7 +428,9 @@ impl SoeSession {
         };
 
         let mut buf = [0u8; SessionResponse::SIZE];
-        let n = response.serialize(&mut buf).expect("session response buffer");
+        let n = response
+            .serialize(&mut buf)
+            .expect("session response buffer");
         self.outgoing.push(Bytes::copy_from_slice(&buf[..n]));
 
         self.state = SessionState::Running;
@@ -507,12 +507,7 @@ impl SoeSession {
                     let len = match multi_packet::read(&mut reader) {
                         Ok(l) => l as usize,
                         Err(_) => {
-                            self.terminate_inner(
-                                DisconnectReason::CorruptPacket,
-                                true,
-                                false,
-                                now,
-                            );
+                            self.terminate_inner(DisconnectReason::CorruptPacket, true, false, now);
                             return;
                         }
                     };
@@ -528,12 +523,7 @@ impl SoeSession {
                     let sub_op = match read_op_code(&sub) {
                         Some(o) => o,
                         None => {
-                            self.terminate_inner(
-                                DisconnectReason::CorruptPacket,
-                                true,
-                                false,
-                                now,
-                            );
+                            self.terminate_inner(DisconnectReason::CorruptPacket, true, false, now);
                             return;
                         }
                     };
@@ -642,7 +632,9 @@ impl SoeSession {
         if notify_remote && self.state == SessionState::Running {
             let disconnect = Disconnect::new(self.session_id, reason);
             let mut payload = [0u8; Disconnect::SIZE];
-            let n = disconnect.serialize(&mut payload).expect("disconnect buffer");
+            let n = disconnect
+                .serialize(&mut payload)
+                .expect("disconnect buffer");
             let dg = self.frame_contextual(OpCode::Disconnect, &payload[..n]);
             self.outgoing.push(dg);
         }
@@ -764,7 +756,10 @@ mod tests {
         pump(&mut client, &mut server, now);
 
         assert_eq!(server.state(), SessionState::Terminated);
-        assert_eq!(server.termination_reason(), DisconnectReason::ProtocolMismatch);
+        assert_eq!(
+            server.termination_reason(),
+            DisconnectReason::ProtocolMismatch
+        );
         // The server rejects before a CRC seed is agreed, so it cannot send a valid
         // contextual Disconnect; the client stays in negotiation and would later time
         // out (matching the C# reference, which only notifies the remote when Running).
@@ -838,13 +833,7 @@ mod tests {
             1,
             now,
         );
-        let mut server = SoeSession::new(
-            SessionMode::Server,
-            params("TestProtocol"),
-            app,
-            2,
-            now,
-        );
+        let mut server = SoeSession::new(SessionMode::Server, params("TestProtocol"), app, 2, now);
 
         client.send_session_request();
         pump(&mut client, &mut server, now);

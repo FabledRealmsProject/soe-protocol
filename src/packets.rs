@@ -276,7 +276,11 @@ impl UnknownSender {
 }
 
 /// Constructs a [`SessionRequest`] using this crate's protocol version.
-pub fn session_request(session_id: u32, udp_length: u32, application_protocol: &str) -> SessionRequest {
+pub fn session_request(
+    session_id: u32,
+    udp_length: u32,
+    application_protocol: &str,
+) -> SessionRequest {
     SessionRequest {
         soe_protocol_version: SOE_PROTOCOL_VERSION,
         session_id,

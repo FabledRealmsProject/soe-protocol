@@ -307,7 +307,9 @@ mod tests {
 
     impl Clock {
         fn new() -> Self {
-            Self { now: Instant::now() }
+            Self {
+                now: Instant::now(),
+            }
         }
         fn advance(&mut self, by: Duration) -> Instant {
             self.now += by;

@@ -31,10 +31,16 @@ async fn main() -> std::io::Result<()> {
         ..SocketConfig::default()
     };
 
-    let mut socket =
-        TokioSoeSocket::bind("127.0.0.1:0".parse().unwrap(), config, Duration::from_millis(5))
-            .await?;
-    println!("client: bound to {}, connecting to {server_addr}", socket.local_addr()?);
+    let mut socket = TokioSoeSocket::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        config,
+        Duration::from_millis(5),
+    )
+    .await?;
+    println!(
+        "client: bound to {}, connecting to {server_addr}",
+        socket.local_addr()?
+    );
     socket.connect(server_addr);
 
     let mut ping_count: u64 = 0;

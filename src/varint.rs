@@ -144,7 +144,17 @@ mod tests {
 
     #[test]
     fn data_bundle_round_trip() {
-        for &len in &[0u32, 1, 0xFE, 0xFF, 0x100, 0xFFFE, 0xFFFF, 0x1_0000, 0xFFFF_FFFF] {
+        for &len in &[
+            0u32,
+            1,
+            0xFE,
+            0xFF,
+            0x100,
+            0xFFFE,
+            0xFFFF,
+            0x1_0000,
+            0xFFFF_FFFF,
+        ] {
             let mut buf = [0u8; 8];
             let mut w = BinaryWriter::new(&mut buf);
             data_bundle::write(&mut w, len).unwrap();
@@ -161,12 +171,26 @@ mod tests {
     fn multi_packet_round_trip() {
         // The single-byte 0xFF case relies on a following 0x00 (the high byte of a
         // sub-packet OP code); the buffer is zero-initialized so this holds.
-        for &len in &[0u32, 1, 0xFE, 0xFF, 0x100, 0xFFFE, 0xFFFF, 0x1_0000, 0xFFFF_FFFF] {
+        for &len in &[
+            0u32,
+            1,
+            0xFE,
+            0xFF,
+            0x100,
+            0xFFFE,
+            0xFFFF,
+            0x1_0000,
+            0xFFFF_FFFF,
+        ] {
             let mut buf = [0u8; 9];
             let mut w = BinaryWriter::new(&mut buf);
             multi_packet::write(&mut w, len).unwrap();
             let written = w.offset();
-            assert_eq!(written, multi_packet::encoded_size(len), "size len={len:#x}");
+            assert_eq!(
+                written,
+                multi_packet::encoded_size(len),
+                "size len={len:#x}"
+            );
             let mut r = BinaryReader::new(&buf);
             let got = multi_packet::read(&mut r).unwrap();
             assert_eq!(got, len, "len={len:#x}");

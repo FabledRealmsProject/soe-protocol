@@ -4,12 +4,8 @@
 mod input;
 mod output;
 
-pub use input::{
-    DataInputStats, InputConfig, OutgoingContextual, ReliableDataInputChannel,
-};
-pub use output::{
-    DataOutputStats, OutgoingReliable, OutputConfig, ReliableDataOutputChannel,
-};
+pub use input::{DataInputStats, InputConfig, OutgoingContextual, ReliableDataInputChannel};
+pub use output::{DataOutputStats, OutgoingReliable, OutputConfig, ReliableDataOutputChannel};
 
 /// Computes the "true" (un-wrapped, monotonically increasing) sequence number for
 /// an incoming packet, given the embedded 16-bit packet sequence and the expected

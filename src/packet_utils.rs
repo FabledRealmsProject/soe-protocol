@@ -1,11 +1,11 @@
 //! Utilities for validating, checksumming and (un)bundling SOE protocol packets.
 
 use crate::crc32::Crc32;
+use crate::error::{Error, Result};
 use crate::packets::{
     Acknowledge, AcknowledgeAll, Disconnect, RemapConnection, SessionRequest, SessionResponse,
     UnknownSender,
 };
-use crate::error::{Error, Result};
 use crate::protocol::OpCode;
 use crate::varint::multi_packet;
 
@@ -229,7 +229,8 @@ mod tests {
     #[test]
     fn validate_accepts_op_only_contextless_packet() {
         let crc = Crc32::new(5);
-        let (result, op) = validate_packet(&[0, OpCode::UnknownSender.as_u16() as u8], &crc, 0, false);
+        let (result, op) =
+            validate_packet(&[0, OpCode::UnknownSender.as_u16() as u8], &crc, 0, false);
         assert_eq!(result, ValidationResult::Valid);
         assert_eq!(op, Some(OpCode::UnknownSender));
     }

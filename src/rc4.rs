@@ -34,8 +34,8 @@ impl Rc4KeyState {
         let mut swap_index1: usize = 0;
         let mut swap_index2: usize = 0;
         for i in 0..KEY_STATE_LENGTH {
-            swap_index2 = (swap_index2 + state[i] as usize + key[swap_index1] as usize)
-                % KEY_STATE_LENGTH;
+            swap_index2 =
+                (swap_index2 + state[i] as usize + key[swap_index1] as usize) % KEY_STATE_LENGTH;
             state.swap(i, swap_index2);
             swap_index1 = (swap_index1 + 1) % key.len();
         }
