@@ -541,10 +541,16 @@ impl SoeSession {
                 self.outgoing.push(dg);
             }
             OpCode::ReliableData => {
-                self.input.handle_reliable_data(body, now);
+                let outcome = self.input.handle_reliable_data(body, now);
+                if outcome.is_err() {
+                    self.terminate_inner(DisconnectReason::CorruptPacket, true, false, now);
+                }
             }
             OpCode::ReliableDataFragment => {
-                self.input.handle_reliable_data_fragment(body, now);
+                let outcome = self.input.handle_reliable_data_fragment(body, now);
+                if outcome.is_err() {
+                    self.terminate_inner(DisconnectReason::CorruptPacket, true, false, now);
+                }
             }
             OpCode::Acknowledge => {
                 if let Ok(ack) = Acknowledge::deserialize(&body) {

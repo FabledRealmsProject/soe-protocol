@@ -21,6 +21,20 @@ use crate::varint::data_bundle;
 
 use super::true_incoming_sequence;
 
+/// The size of a master fragment's big-endian `u32` total-length prefix.
+const FRAGMENT_COMPLETE_LENGTH_SIZE: usize = 4;
+
+/// An upper bound on how much capacity to pre-allocate for a reassembly buffer based
+/// on a fragment's self-reported total length. The buffer still grows to fit data
+/// that actually arrives; this only prevents a malicious master fragment from forcing
+/// a huge up-front allocation from a tiny packet.
+const MAX_FRAGMENT_PREALLOC: usize = 64 * 1024;
+
+/// Signals that incoming reliable data was malformed. The session should respond by
+/// terminating the connection as [`DisconnectReason::CorruptPacket`](crate::protocol::DisconnectReason::CorruptPacket).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CorruptData;
+
 /// Statistics gathered while receiving reliable data.
 #[derive(Debug, Default, Clone)]
 pub struct DataInputStats {
@@ -160,25 +174,32 @@ impl ReliableDataInputChannel {
         }
     }
 
-    /// Handles a [`OpCode::ReliableData`] packet (OP code already stripped).
-    pub fn handle_reliable_data(&mut self, data: Bytes, now: Instant) {
+    /// Handles a [`OpCode::ReliableData`] packet (OP code already stripped). Returns
+    /// `Err` if the data (or any stashed fragment it releases) is malformed.
+    pub fn handle_reliable_data(&mut self, data: Bytes, now: Instant) -> Result<(), CorruptData> {
         if !self.preprocess(&data, false, now) {
-            return;
+            return Ok(());
         }
         self.process_data(data.slice(2..));
         self.window_start_sequence += 1;
-        self.consume_stashed();
+        self.consume_stashed()
     }
 
     /// Handles a [`OpCode::ReliableDataFragment`] packet (OP code already stripped).
-    pub fn handle_reliable_data_fragment(&mut self, data: Bytes, now: Instant) {
+    /// Returns `Err` if the fragment (or any stashed fragment it releases) is
+    /// malformed.
+    pub fn handle_reliable_data_fragment(
+        &mut self,
+        data: Bytes,
+        now: Instant,
+    ) -> Result<(), CorruptData> {
         if !self.preprocess(&data, true, now) {
-            return;
+            return Ok(());
         }
-        self.write_immediate_fragment(&data[2..]);
+        self.write_immediate_fragment(&data[2..])?;
         self.window_start_sequence += 1;
         self.try_process_current_buffer();
-        self.consume_stashed();
+        self.consume_stashed()
     }
 
     fn emit(&mut self, op_code: OpCode, sequence: u16) {
@@ -260,17 +281,35 @@ impl ReliableDataInputChannel {
     }
 
     /// Appends fragment data to the current buffer, allocating it (and reading the
-    /// total length prefix) if this is the master fragment.
-    fn write_immediate_fragment(&mut self, data: &[u8]) {
+    /// total length prefix) if this is the master fragment. Returns `Err` if a master
+    /// fragment is too short to contain its length prefix.
+    fn write_immediate_fragment(&mut self, data: &[u8]) -> Result<(), CorruptData> {
         if let Some(buf) = &mut self.current_buffer {
             buf.extend_from_slice(data);
         } else {
+            // A master fragment must carry a 4-byte total-length prefix. A shorter one
+            // is malformed (and previously panicked when indexing the prefix).
+            if data.len() < FRAGMENT_COMPLETE_LENGTH_SIZE {
+                return Err(CorruptData);
+            }
             let expected = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
             self.expected_data_length = expected;
-            let mut buf = BytesMut::with_capacity(expected);
-            buf.extend_from_slice(&data[4..]);
+            // Cap the up-front allocation: the buffer still grows to fit data that
+            // actually arrives, but a tiny packet can't claim (e.g.) 4 GiB and force a
+            // matching allocation.
+            let mut buf = BytesMut::with_capacity(expected.min(MAX_FRAGMENT_PREALLOC));
+            buf.extend_from_slice(&data[FRAGMENT_COMPLETE_LENGTH_SIZE..]);
             self.current_buffer = Some(buf);
         }
+        Ok(())
+    }
+
+    /// The pre-allocated capacity of the in-progress reassembly buffer, if any.
+    /// Used by tests to assert that a hostile master fragment can't force a huge
+    /// up-front allocation.
+    #[cfg(test)]
+    fn current_buffer_capacity(&self) -> Option<usize> {
+        self.current_buffer.as_ref().map(|b| b.capacity())
     }
 
     fn try_process_current_buffer(&mut self) {
@@ -284,7 +323,7 @@ impl ReliableDataInputChannel {
         self.expected_data_length = 0;
     }
 
-    fn consume_stashed(&mut self) {
+    fn consume_stashed(&mut self) -> Result<(), CorruptData> {
         loop {
             let spot = self.window_start_sequence.rem_euclid(self.max_queued()) as usize;
             let Some(item) = self.stash[spot].take() else {
@@ -292,7 +331,7 @@ impl ReliableDataInputChannel {
             };
 
             if item.is_fragment {
-                self.write_immediate_fragment(&item.data);
+                self.write_immediate_fragment(&item.data)?;
                 self.try_process_current_buffer();
             } else {
                 self.process_data(item.data);
@@ -300,6 +339,7 @@ impl ReliableDataInputChannel {
 
             self.window_start_sequence += 1;
         }
+        Ok(())
     }
 
     fn process_data(&mut self, data: Bytes) {
@@ -433,15 +473,18 @@ mod tests {
         let (f1, d1) = data_fragment(1, None, DATA_LENGTH);
         let (f2, d2) = data_fragment(2, None, DATA_LENGTH);
 
-        ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f0), clock.tick());
+        ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f0), clock.tick())
+            .unwrap();
         assert_pop_ack(&mut ch, &mut clock, &mut pending, 0, !ack_all);
         assert!(ch.take_app_data().is_empty());
 
-        ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f1), clock.tick());
+        ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f1), clock.tick())
+            .unwrap();
         assert_pop_ack(&mut ch, &mut clock, &mut pending, 1, !ack_all);
         assert!(ch.take_app_data().is_empty());
 
-        ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f2), clock.tick());
+        ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f2), clock.tick())
+            .unwrap();
         assert_pop_ack(&mut ch, &mut clock, &mut pending, 2, !ack_all);
         let app = ch.take_app_data();
         assert_eq!(app.len(), 1);
@@ -468,14 +511,17 @@ mod tests {
         let (f1, d1) = data_fragment(1, None, DATA_LENGTH);
         let (f2, d2) = data_fragment(2, None, DATA_LENGTH);
 
-        ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f2), clock.tick());
+        ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f2), clock.tick())
+            .unwrap();
         assert_pop_ack(&mut ch, &mut clock, &mut pending, 2, false);
 
-        ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f0), clock.tick());
+        ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f0), clock.tick())
+            .unwrap();
         assert_pop_ack(&mut ch, &mut clock, &mut pending, 0, !ack_all);
         assert!(ch.take_app_data().is_empty());
 
-        ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f1), clock.tick());
+        ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f1), clock.tick())
+            .unwrap();
         assert_pop_ack(
             &mut ch,
             &mut clock,
@@ -508,15 +554,18 @@ mod tests {
         let (p1, d1) = data_fragment(1, None, DATA_LENGTH);
         let (p2, d2) = data_fragment(2, None, DATA_LENGTH);
 
-        ch.handle_reliable_data(Bytes::copy_from_slice(&p0), clock.tick());
+        ch.handle_reliable_data(Bytes::copy_from_slice(&p0), clock.tick())
+            .unwrap();
         assert_pop_ack(&mut ch, &mut clock, &mut pending, 0, !ack_all);
         let app = ch.take_app_data();
         assert_eq!(app, vec![d0]);
 
-        ch.handle_reliable_data(Bytes::copy_from_slice(&p2), clock.tick());
+        ch.handle_reliable_data(Bytes::copy_from_slice(&p2), clock.tick())
+            .unwrap();
         assert_pop_ack(&mut ch, &mut clock, &mut pending, 2, false);
 
-        ch.handle_reliable_data(Bytes::copy_from_slice(&p1), clock.tick());
+        ch.handle_reliable_data(Bytes::copy_from_slice(&p1), clock.tick())
+            .unwrap();
         assert_pop_ack(
             &mut ch,
             &mut clock,
@@ -545,22 +594,26 @@ mod tests {
         let (f2, d2) = data_fragment(2, Some((DATA_LENGTH * 2) as u32), DATA_LENGTH);
         let (f3, d3) = data_fragment(3, None, DATA_LENGTH);
 
-        ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f0), clock.tick());
+        ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f0), clock.tick())
+            .unwrap();
         assert_pop_ack(&mut ch, &mut clock, &mut pending, 0, !ack_all);
         assert!(ch.take_app_data().is_empty());
 
-        ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f1), clock.tick());
+        ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f1), clock.tick())
+            .unwrap();
         assert_pop_ack(&mut ch, &mut clock, &mut pending, 1, !ack_all);
         let app = ch.take_app_data();
         assert_eq!(app.len(), 1);
         assert_eq!(&app[0][..DATA_LENGTH], &d0[..]);
         assert_eq!(&app[0][DATA_LENGTH..], &d1[..]);
 
-        ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f3), clock.tick());
+        ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f3), clock.tick())
+            .unwrap();
         assert_pop_ack(&mut ch, &mut clock, &mut pending, 3, false);
         assert!(ch.take_app_data().is_empty());
 
-        ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f2), clock.tick());
+        ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f2), clock.tick())
+            .unwrap();
         assert_pop_ack(
             &mut ch,
             &mut clock,
@@ -589,12 +642,15 @@ mod tests {
         let (f1, d1) = data_fragment(1, Some((DATA_LENGTH * 2) as u32), DATA_LENGTH);
         let (f2, d2) = data_fragment(2, None, DATA_LENGTH);
 
-        ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f1), clock.tick());
-        ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f2), clock.tick());
+        ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f1), clock.tick())
+            .unwrap();
+        ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&f2), clock.tick())
+            .unwrap();
         assert_pop_ack(&mut ch, &mut clock, &mut pending, 1, false);
         assert_pop_ack(&mut ch, &mut clock, &mut pending, 2, false);
 
-        ch.handle_reliable_data(Bytes::copy_from_slice(&p0), clock.tick());
+        ch.handle_reliable_data(Bytes::copy_from_slice(&p0), clock.tick())
+            .unwrap();
         assert_pop_ack(
             &mut ch,
             &mut clock,
@@ -628,12 +684,14 @@ mod tests {
         multi.extend_from_slice(&[1, 2]); // length 1, data byte 2
         multi.extend_from_slice(&[1, 4]); // length 1, data byte 4
 
-        ch.handle_reliable_data(Bytes::copy_from_slice(&multi), clock.tick());
+        ch.handle_reliable_data(Bytes::copy_from_slice(&multi), clock.tick())
+            .unwrap();
         assert_pop_ack(&mut ch, &mut clock, &mut pending, 0, !ack_all);
         assert_eq!(ch.take_app_data(), vec![vec![2u8], vec![4u8]]);
 
         multi[1] = 0x01; // increment sequence to 1
-        ch.handle_reliable_data(Bytes::copy_from_slice(&multi), clock.tick());
+        ch.handle_reliable_data(Bytes::copy_from_slice(&multi), clock.tick())
+            .unwrap();
         assert_pop_ack(&mut ch, &mut clock, &mut pending, 1, !ack_all);
         assert_eq!(ch.take_app_data(), vec![vec![2u8], vec![4u8]]);
     }
@@ -660,7 +718,8 @@ mod tests {
         let total: u32 = 65_540;
         for i in 0..total {
             let (pkt, _) = data_fragment((i & 0xFFFF) as u16, None, DATA_LENGTH);
-            ch.handle_reliable_data(Bytes::copy_from_slice(&pkt), clock.tick());
+            ch.handle_reliable_data(Bytes::copy_from_slice(&pkt), clock.tick())
+                .unwrap();
             // Drop accumulated acks/app-data to keep memory bounded.
             ch.take_outgoing();
             ch.take_app_data();
@@ -683,5 +742,48 @@ mod tests {
                 "ack-all throttle broke after wraparound: redundant ack emitted"
             );
         }
+    }
+
+    /// A master fragment must carry a 4-byte total-length prefix. A shorter one used
+    /// to be indexed unconditionally (`data[0..4]`), panicking the whole driver on a
+    /// hostile 1–3 byte fragment (a remote denial-of-service). It must now be reported
+    /// as corrupt instead.
+    #[test]
+    fn short_master_fragment_is_rejected_without_panic() {
+        let mut clock = Clock::new();
+        let mut ch = new_channel(&clock, false);
+
+        // Sequence 0 (the master fragment) with only 2 of the required 4 length bytes.
+        let mut pkt = Vec::new();
+        pkt.extend_from_slice(&0u16.to_be_bytes());
+        pkt.extend_from_slice(&[0xAB, 0xCD]);
+
+        let result = ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&pkt), clock.tick());
+        assert_eq!(result, Err(CorruptData));
+    }
+
+    /// A master fragment self-reports its total length. A malicious one can claim a
+    /// huge length (up to 4 GiB) while carrying only a few payload bytes; the channel
+    /// must not pre-allocate a matching buffer. This completes quickly only because
+    /// the up-front allocation is capped; an uncapped `with_capacity(u32::MAX)` would
+    /// attempt a multi-gigabyte allocation here.
+    #[test]
+    fn huge_claimed_length_master_fragment_does_not_preallocate() {
+        let mut clock = Clock::new();
+        let mut ch = new_channel(&clock, false);
+
+        let (pkt, _) = data_fragment(0, Some(u32::MAX), DATA_LENGTH);
+        // Must not panic/OOM, and a single fragment is valid so far (more awaited).
+        let result = ch.handle_reliable_data_fragment(Bytes::copy_from_slice(&pkt), clock.tick());
+        assert_eq!(result, Ok(()));
+        // The reassembly buffer must NOT have pre-allocated the claimed 4 GiB; it is
+        // capped regardless of the self-reported length. (Without the cap this is
+        // ~u32::MAX bytes — the actual amplification attack.)
+        assert!(
+            ch.current_buffer_capacity().unwrap() <= MAX_FRAGMENT_PREALLOC,
+            "reassembly buffer pre-allocated more than the cap from a hostile length"
+        );
+        // The (incomplete) reassembly has produced no application data yet.
+        assert!(ch.take_app_data().is_empty());
     }
 }
