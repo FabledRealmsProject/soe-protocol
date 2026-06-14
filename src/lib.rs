@@ -8,6 +8,7 @@
 //! This crate is structured as a sans-I/O core: the protocol logic is a pure state
 //! machine, with runtime-agnostic adapters layered on top.
 
+pub mod channel;
 pub mod constants;
 pub mod crc32;
 pub mod error;
