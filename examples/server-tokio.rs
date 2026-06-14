@@ -1,6 +1,6 @@
 //! A minimal SOE echo server built on the `tokio` adapter.
 //!
-//! Run with: `cargo run --features tokio --example server -- 127.0.0.1:20260`
+//! Run with: `cargo run --features tokio --example server-tokio -- 127.0.0.1:20260`
 //!
 //! It listens for SOE sessions and echoes any reliable data back to the sender.
 

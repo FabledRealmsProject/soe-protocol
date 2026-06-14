@@ -20,9 +20,15 @@ tokio = ["dep:tokio"]
 tokio = { version = "1", features = ["net", "rt", "rt-multi-thread", "time", "macros"] }
 
 [[example]]
-name = "server"
+name = "server-tokio"
 required-features = ["tokio"]
 
 [[example]]
-name = "client"
+name = "client-tokio"
 required-features = ["tokio"]
+
+[[example]]
+name = "server-sync"
+
+[[example]]
+name = "client-sync"

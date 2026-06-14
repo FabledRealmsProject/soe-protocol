@@ -1,7 +1,7 @@
 //! A minimal SOE ping client built on the `tokio` adapter.
 //!
-//! Run with: `cargo run --features tokio --example client -- 127.0.0.1:20260`
-//! (after starting the `server` example).
+//! Run with: `cargo run --features tokio --example client-tokio -- 127.0.0.1:20260`
+//! (after starting the `server-tokio` example).
 //!
 //! It connects to the server, sends a "ping", and replies to each echo with the
 //! next ping after a short pause — a simple ping-pong.
