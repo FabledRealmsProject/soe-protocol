@@ -12,6 +12,7 @@ pub mod constants;
 pub mod crc32;
 pub mod error;
 pub mod io;
+pub mod packet_utils;
 pub mod packets;
 pub mod protocol;
 pub mod rc4;
