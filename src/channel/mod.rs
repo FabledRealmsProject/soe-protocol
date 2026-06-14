@@ -2,9 +2,13 @@
 //! fragmentation/sequencing of outgoing data.
 
 mod input;
+mod output;
 
 pub use input::{
     DataInputStats, InputConfig, OutgoingContextual, ReliableDataInputChannel,
+};
+pub use output::{
+    DataOutputStats, OutgoingReliable, OutputConfig, ReliableDataOutputChannel,
 };
 
 /// Computes the "true" (un-wrapped, monotonically increasing) sequence number for
