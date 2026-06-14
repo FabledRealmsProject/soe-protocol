@@ -214,6 +214,30 @@ socket (with a blanket impl for `std::net::UdpSocket`).
 This implementation is a port informed by the public C# and Zig implementations in
 [Sanctuary.SoeProtocol](https://github.com/PS2Sanctuary/Sanctuary.SoeProtocol).
 
+While porting, the protocol behaviour was re-derived from the reference rather than
+copied, which surfaced a few improvements over it:
+
+- **Runtime-agnostic sans-I/O core.** The protocol logic is a pure state machine with
+  no I/O or runtime dependency. Time is passed in explicitly, datagrams are fed and
+  drained as buffers, and runtime adapters (Tokio, blocking, or your own) sit on top.
+  The reference couples the protocol to its host runtime.
+- **Sequence-wraparound fix.** The reliable-data ack-all throttle compared a truncated
+  16-bit wire sequence against a full-width counter, so after 65,536 packets the
+  throttle broke and the channel spammed acknowledgements every tick. This bug is
+  present in both the C# and Zig references; here sequences are tracked at full width
+  and truncated only on the wire.
+- **Hardened fragment reassembly.** Master-fragment parsing is guarded against hostile
+  input: short fragments no longer panic, and the attacker-controlled reassembly length
+  can no longer trigger a multi-gigabyte preallocation (both are bounded and answered
+  with a `CorruptPacket` disconnect). The reference shares this gap.
+- **Multi-packet short-circuit.** Processing a bundled multi-packet now stops as soon as
+  a sub-packet terminates the session, instead of continuing to act on later sub-packets
+  of an already-closed session.
+- **Idiomatic, defensive Rust API.** Public types implement `Debug` (with the RC4 key
+  state redacted), data-enqueue calls are `#[must_use]` so dropped payloads can't pass
+  silently, and the parse paths are exercised by an end-to-end fuzz suite and the ported
+  regression tests.
+
 ## License
 
 Licensed under GPL-3.0-or-later. See [LICENSE](LICENSE).
