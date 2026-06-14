@@ -12,8 +12,11 @@ pub mod constants;
 pub mod crc32;
 pub mod error;
 pub mod io;
+pub mod packets;
+pub mod protocol;
 pub mod rc4;
 pub mod varint;
 pub mod zlib;
 
 pub use error::{Error, Result};
+pub use protocol::{DisconnectReason, OpCode};
