@@ -33,7 +33,7 @@ use crate::session::{
 /// A driver-agnostic surface for managing SOE sessions over a UDP socket.
 ///
 /// Implemented by the concrete socket drivers — [`crate::sync_rt::SyncSoeSocket`]
-/// and (with the `tokio` feature) [`crate::tokio_rt::TokioSoeSocket`] — so that
+/// and (with the `tokio` feature) `TokioSoeSocket` — so that
 /// application code can be written generically over the driver.
 ///
 /// The I/O drive step itself differs between drivers (a blocking `step` versus an

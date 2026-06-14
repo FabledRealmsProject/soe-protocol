@@ -2,7 +2,7 @@
 //! blocking [`std::net::UdpSocket`]. Always available; pulls in no async runtime.
 //!
 //! The sans-I/O [`SoeMultiplexer`] is runtime-agnostic; this module is a thin
-//! convenience layer mirroring [`crate::tokio_rt::TokioSoeSocket`] for callers who
+//! convenience layer mirroring `TokioSoeSocket` (behind the `tokio` feature) for callers who
 //! prefer a plain blocking loop. Both types implement [`SoeSocket`].
 
 use std::io;

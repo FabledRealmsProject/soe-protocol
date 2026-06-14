@@ -17,6 +17,10 @@ tokio = { version = "1", features = ["macros", "net", "rt", "sync", "time"], opt
 [features]
 tokio = ["dep:tokio"]
 
+[package.metadata.docs.rs]
+# Document the Tokio adapters on docs.rs (they are behind the `tokio` feature).
+all-features = true
+
 [dev-dependencies]
 tokio = { version = "1", features = ["net", "rt", "rt-multi-thread", "time", "macros"] }
 

@@ -19,7 +19,7 @@ impl Rc4KeyState {
     /// Creates a new key state by scheduling the given key bytes.
     ///
     /// # Panics
-    /// Panics if `key` is empty or longer than [`KEY_STATE_LENGTH`].
+    /// Panics if `key` is empty or longer than 256 bytes (the RC4 key-state length).
     pub fn new(key: &[u8]) -> Self {
         assert!(
             !key.is_empty() && key.len() <= KEY_STATE_LENGTH,
