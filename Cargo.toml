@@ -8,3 +8,5 @@ rust-version = "1.88.0"
 license = "GPL-3.0-or-later"
 
 [dependencies]
+flate2 = "1.1.9"
+thiserror = "2.0.18"
