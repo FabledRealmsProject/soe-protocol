@@ -1,5 +1,7 @@
 # soe-protocol
 
+[![Build and Check](https://github.com/yungcomputerchair/soe-protocol/actions/workflows/rust.yml/badge.svg?branch=main)](https://github.com/yungcomputerchair/soe-protocol/actions/workflows/rust.yml)
+
 A Rust implementation of version 3 of the **SOE** (Sony Online Entertainment) network
 protocol.
 
