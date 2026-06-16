@@ -192,6 +192,13 @@ fn multiple_large_packets() {
     ]);
 }
 
+/// A single very large packet (400 KB), forcing deep fragmentation across many
+/// fragment windows and reassembly cycles.
+#[test]
+fn single_huge_packet_fragmentation() {
+    assert_roundtrip(&[generate_packet(400 * 1024)]);
+}
+
 /// The headline fuzz case: 256 packets sized 256, 512, ... up to 65536 bytes,
 /// exercising deep fragmentation and many window cycles.
 #[test]
