@@ -28,6 +28,19 @@ const SEQUENCE_SIZE: usize = 2;
 /// The size of a master fragment's total-length prefix.
 const FRAGMENT_LENGTH_SIZE: usize = 4;
 
+/// Adaptive retransmit-timeout (RTO) tuning. Uses the Jacobson/Karels SRTT/RTTVAR
+/// estimator (SIGCOMM '88, "Congestion Avoidance and Control"), as later standardized
+/// for TCP in RFC 6298.
+/// `RTO = SRTT + max(RTO_GRANULARITY, RTT_K * RTTVAR)`, clamped to [RTO_MIN, RTO_MAX].
+const RTT_K: u32 = 4;
+/// Floor on the variance term so the RTO keeps headroom above a perfectly steady RTT
+/// (otherwise RTTVAR -> 0 makes RTO == RTT and the timer fires right as acks arrive).
+const RTO_GRANULARITY: Duration = Duration::from_millis(100);
+/// Lower clamp on the computed RTO; avoids spurious resends on very low-RTT links.
+const RTO_MIN: Duration = Duration::from_millis(200);
+/// Upper clamp on the computed RTO (also the ceiling for exponential backoff).
+const RTO_MAX: Duration = Duration::from_secs(8);
+
 /// Statistics gathered while sending reliable data.
 #[derive(Debug, Default, Clone)]
 pub struct DataOutputStats {
@@ -51,8 +64,10 @@ pub struct OutputConfig {
     /// The maximum number of unacknowledged reliable data packets that may be in
     /// flight at once (the send window).
     pub max_queued_outgoing: usize,
-    /// How long to wait for an acknowledgement before resending from the start of
-    /// the window.
+    /// The INITIAL retransmit timeout, used before any round-trip time has been
+    /// measured. Once acknowledgements start arriving the channel derives an adaptive
+    /// RTO from the measured RTT (see `RTT_K`/`RTO_MIN`/`RTO_MAX`), so this value only
+    /// governs the very first window.
     pub ack_wait: Duration,
 }
 
@@ -83,6 +98,12 @@ struct StashedOutputPacket {
     is_fragment: bool,
     data: Bytes,
     sent: bool,
+    /// When this packet was most recently (re)sent, for RTT measurement and per-packet
+    /// retransmit timing. `None` until first dispatched.
+    sent_at: Option<Instant>,
+    /// Set once the packet has been retransmitted: its RTT becomes ambiguous, so it must
+    /// not be used as a round-trip sample (Karn's algorithm).
+    resent: bool,
 }
 
 /// Converts application data into ordered, fragmented reliable data packets.
@@ -100,7 +121,12 @@ pub struct ReliableDataOutputChannel {
     /// The index into `dispatch_queue` of the next packet to dispatch.
     current_dispatch_index: usize,
 
-    last_ack_at: Instant,
+    /// Smoothed round-trip time estimate (`None` until the first RTT sample).
+    srtt: Option<Duration>,
+    /// Round-trip time variation estimate (the RTTVAR term of the Jacobson/Karels estimator).
+    rttvar: Duration,
+    /// Current retransmit timeout: adaptive once RTT is known, else `config.ack_wait`.
+    rto: Duration,
 
     outgoing: Vec<OutgoingReliable>,
     stats: DataOutputStats,
@@ -110,7 +136,8 @@ impl ReliableDataOutputChannel {
     /// Creates a new output channel. `cipher` is the initial RC4 key state; pass
     /// `Some(..)` to enable RC4 encryption of the proxied application data, or `None`
     /// to pass it through unencrypted.
-    pub fn new(config: OutputConfig, cipher: Option<Rc4KeyState>, now: Instant) -> Self {
+    pub fn new(config: OutputConfig, cipher: Option<Rc4KeyState>, _now: Instant) -> Self {
+        let initial_rto = config.ack_wait;
         Self {
             config,
             cipher,
@@ -118,7 +145,9 @@ impl ReliableDataOutputChannel {
             total_sequence: 0,
             max_client_sequence: 0,
             current_dispatch_index: 0,
-            last_ack_at: now,
+            srtt: None,
+            rttvar: Duration::ZERO,
+            rto: initial_rto,
             outgoing: Vec::new(),
             stats: DataOutputStats::default(),
         }
@@ -169,11 +198,23 @@ impl ReliableDataOutputChannel {
     }
 
     /// Runs a tick of the output channel, moving due packets into the outgoing
-    /// buffer. If no acknowledgement has been received within the configured
-    /// `ack_wait`, dispatch restarts from the front of the window.
+    /// buffer. If the oldest in-flight packet has gone unacknowledged for longer than
+    /// the current (adaptive) retransmit timeout, dispatch restarts from the front of
+    /// the window (go-back-N) and the RTO is backed off exponentially (Karn).
     pub fn run_tick(&mut self, now: Instant) {
-        if now.duration_since(self.last_ack_at) > self.config.ack_wait {
+        // Retransmission timeout is keyed off the OLDEST in-flight packet's own send time
+        // (not a single global timer), so a long quiet period before the first ack can't
+        // make every tick resend the whole window.
+        let timed_out = match self.dispatch_queue.front() {
+            Some((_, front)) if front.sent => front
+                .sent_at
+                .is_some_and(|sent_at| now.duration_since(sent_at) > self.rto),
+            _ => false,
+        };
+        if timed_out {
             self.current_dispatch_index = 0;
+            // Karn's exponential backoff; a fresh (unambiguous) RTT sample resets this.
+            self.rto = (self.rto * 2).min(RTO_MAX);
         }
 
         let max_index = self
@@ -192,13 +233,37 @@ impl ReliableDataOutputChannel {
             self.stats.total_sent += 1;
             if packet.sent {
                 self.stats.total_resent += 1;
+                // A retransmitted packet's RTT is ambiguous; exclude it from sampling.
+                packet.resent = true;
             }
             packet.sent = true;
+            packet.sent_at = Some(now);
 
             let payload = packet.data.clone();
             self.outgoing.push(OutgoingReliable { op_code, payload });
             self.current_dispatch_index += 1;
         }
+    }
+
+    /// Folds a fresh, unambiguous round-trip sample into the smoothed RTT/variance
+    /// estimates and recomputes the adaptive retransmit timeout (Jacobson/Karels estimator).
+    fn update_rto(&mut self, sample: Duration) {
+        match self.srtt {
+            None => {
+                self.srtt = Some(sample);
+                self.rttvar = sample / 2;
+            }
+            Some(srtt) => {
+                let diff = srtt.abs_diff(sample);
+                // RTTVAR = 3/4 * RTTVAR + 1/4 * |SRTT - sample|
+                self.rttvar = (self.rttvar * 3 + diff) / 4;
+                // SRTT = 7/8 * SRTT + 1/8 * sample
+                self.srtt = Some((srtt * 7 + sample) / 8);
+            }
+        }
+        let srtt = self.srtt.unwrap_or(sample);
+        let rto = srtt + std::cmp::max(RTO_GRANULARITY, self.rttvar * RTT_K);
+        self.rto = rto.clamp(RTO_MIN, RTO_MAX);
     }
 
     /// Notifies the channel that the remote has acknowledged a single sequence.
@@ -207,15 +272,21 @@ impl ReliableDataOutputChannel {
         self.stats.incoming_acknowledge_count += 1;
 
         if let Some(pos) = self.dispatch_queue.iter().position(|(s, _)| *s == seq) {
+            let (_, pkt) = &self.dispatch_queue[pos];
+            let sample = (pkt.sent && !pkt.resent)
+                .then(|| pkt.sent_at.map(|sent_at| now.duration_since(sent_at)))
+                .flatten();
             self.dispatch_queue.remove(pos);
             self.current_dispatch_index = self.current_dispatch_index.saturating_sub(1);
             self.stats.actual_acknowledge_count += 1;
+            if let Some(sample) = sample {
+                self.update_rto(sample);
+            }
         }
 
         if seq > self.max_client_sequence {
             self.max_client_sequence = seq;
         }
-        self.last_ack_at = now;
     }
 
     /// Notifies the channel that the remote has acknowledged all sequences up to and
@@ -224,19 +295,36 @@ impl ReliableDataOutputChannel {
         let seq = self.true_incoming(sequence);
         self.stats.incoming_acknowledge_count += 1;
 
-        while let Some((s, _)) = self.dispatch_queue.front() {
-            if *s > seq {
+        let mut sample: Option<Duration> = None;
+        loop {
+            let (pop, this_sample) = match self.dispatch_queue.front() {
+                Some((s, pkt)) if *s <= seq => {
+                    let smp = (pkt.sent && !pkt.resent)
+                        .then(|| pkt.sent_at.map(|sent_at| now.duration_since(sent_at)))
+                        .flatten();
+                    (true, smp)
+                }
+                _ => (false, None),
+            };
+            if !pop {
                 break;
+            }
+            // Keep the freshest (most recently sent) unambiguous sample in this batch.
+            if this_sample.is_some() {
+                sample = this_sample;
             }
             self.dispatch_queue.pop_front();
             self.current_dispatch_index = self.current_dispatch_index.saturating_sub(1);
             self.stats.actual_acknowledge_count += 1;
         }
 
+        if let Some(sample) = sample {
+            self.update_rto(sample);
+        }
+
         if seq > self.max_client_sequence {
             self.max_client_sequence = seq;
         }
-        self.last_ack_at = now;
     }
 
     fn stash_fragment(&mut self, data: &mut Bytes, is_master: bool, is_fragment: bool) {
@@ -258,6 +346,8 @@ impl ReliableDataOutputChannel {
                 is_fragment,
                 data: buf.freeze(),
                 sent: false,
+                sent_at: None,
+                resent: false,
             },
         ));
 
@@ -510,5 +600,144 @@ mod tests {
                 "in-flight unacked packets ({in_flight}) exceeded the window ({FRAGMENT_WINDOW_SIZE})",
             );
         }
+    }
+
+    /// Once a real round-trip time has been measured, the retransmit timeout must adapt
+    /// upward so a quiet gap LONGER than the initial `ack_wait` no longer triggers a
+    /// spurious resend. A fixed RTO (== ack_wait) would resend here; the adaptive RTO
+    /// (SRTT + 4*RTTVAR after a ~500ms sample => ~1.5s) must not.
+    #[test]
+    fn adaptive_rto_suppresses_resend_after_learning_high_rtt() {
+        let mut clock = Clock::new();
+        let mut ch = new_channel(&clock); // ack_wait = 500ms
+
+        // Send one window.
+        let fragment_count = FRAGMENT_WINDOW_SIZE + 4;
+        let packet_length = MAX_DATA_LENGTH - 4 + MAX_DATA_LENGTH * (fragment_count - 1);
+        let packet = generate_packet(packet_length);
+        ch.enqueue_data(&packet);
+        ch.run_tick(clock.advance(Duration::from_millis(1)));
+        let _ = ch.take_outgoing();
+
+        // Acknowledge the whole first window after a ~500ms round trip: this feeds the
+        // RTO estimator a 500ms sample, raising the RTO well above the 500ms ack_wait.
+        ch.notify_of_acknowledge_all(
+            (FRAGMENT_WINDOW_SIZE - 1) as u16,
+            clock.advance(Duration::from_millis(500)),
+        );
+
+        // The newly admitted window is now in flight. Advance 600ms (> the old fixed
+        // ack_wait) with no further ack. With a fixed RTO this resends the window; with
+        // the adaptive RTO (~1.5s) it must NOT.
+        ch.run_tick(clock.advance(Duration::from_millis(1)));
+        let _ = ch.take_outgoing();
+        ch.run_tick(clock.advance(Duration::from_millis(600)));
+        let resent = ch.take_outgoing();
+
+        assert!(
+            resent.is_empty(),
+            "adaptive RTO must not resend within the learned RTT, but resent {} packets",
+            resent.len()
+        );
+        assert_eq!(
+            ch.stats().total_resent,
+            0,
+            "no packet should have been retransmitted after the RTO adapted to the RTT"
+        );
+    }
+
+    /// End-to-end drain at RTT ~= the initial `ack_wait`: the channel must deliver every
+    /// packet while keeping in-flight within ~1 window and the on-wire datagram count close
+    /// to the unique count (no resend storm). Models a delayed pipe with cumulative acks.
+    #[test]
+    fn adaptive_rto_bounds_inflight_at_high_rtt() {
+        let mut clock = Clock::new();
+        let mut ch = new_channel(&clock);
+
+        let one_way = Duration::from_millis(250); // RTT ~= ack_wait (500ms)
+        let tick = Duration::from_millis(5);
+
+        let fragment_count = 30;
+        let packet_length = MAX_DATA_LENGTH - 4 + MAX_DATA_LENGTH * (fragment_count - 1);
+        let packet = generate_packet(packet_length);
+        ch.enqueue_data(&packet);
+        let unique = ch.queued_len();
+
+        let mut to_client: Vec<(Instant, u16)> = Vec::new();
+        let mut to_server: Vec<(Instant, u16)> = Vec::new();
+        let mut received = vec![false; unique];
+
+        let mut total_on_wire = 0usize;
+        let mut highest_sent: i64 = -1;
+        let mut last_ack: i64 = -1;
+        let mut max_in_flight: i64 = 0;
+
+        for _ in 0..800 {
+            let now = clock.advance(tick);
+
+            // Deliver acks that have arrived back at the server.
+            to_server.retain(|&(at, ack)| {
+                if at <= now {
+                    ch.notify_of_acknowledge_all(ack, now);
+                    last_ack = last_ack.max(ack as i64);
+                    false
+                } else {
+                    true
+                }
+            });
+
+            // Deliver datagrams that have arrived at the client; ack the highest
+            // contiguous sequence seen so far.
+            let mut delivered_any = false;
+            to_client.retain(|&(at, seq)| {
+                if at <= now {
+                    received[seq as usize] = true;
+                    delivered_any = true;
+                    false
+                } else {
+                    true
+                }
+            });
+            if delivered_any {
+                let mut hw: i64 = -1;
+                for (seq, got) in received.iter().enumerate() {
+                    if *got {
+                        hw = seq as i64;
+                    } else {
+                        break;
+                    }
+                }
+                if hw >= 0 {
+                    to_server.push((now + one_way, hw as u16));
+                }
+            }
+
+            ch.run_tick(now);
+            for out in ch.take_outgoing() {
+                let seq = u16::from_be_bytes([out.payload[0], out.payload[1]]);
+                total_on_wire += 1;
+                highest_sent = highest_sent.max(seq as i64);
+                to_client.push((now + one_way, seq));
+            }
+
+            max_in_flight = max_in_flight.max(highest_sent - last_ack);
+
+            if last_ack >= 0 && last_ack as usize + 1 == unique {
+                break;
+            }
+        }
+
+        assert!(
+            last_ack >= 0 && last_ack as usize + 1 == unique,
+            "channel did not drain all {unique} packets (acked through {last_ack})"
+        );
+        assert!(
+            max_in_flight <= FRAGMENT_WINDOW_SIZE as i64 + 2,
+            "in-flight ({max_in_flight}) far exceeded the window ({FRAGMENT_WINDOW_SIZE}) -> resend storm",
+        );
+        assert!(
+            total_on_wire <= unique + unique / 4,
+            "sent {total_on_wire} datagrams for {unique} unique packets (>1.25x = resend storm)",
+        );
     }
 }
