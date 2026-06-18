@@ -179,7 +179,7 @@ impl ReliableDataOutputChannel {
         let max_index = self
             .dispatch_queue
             .len()
-            .min(self.config.max_queued_outgoing + self.current_dispatch_index);
+            .min(self.config.max_queued_outgoing);
 
         while self.current_dispatch_index < max_index {
             let (_, packet) = &mut self.dispatch_queue[self.current_dispatch_index];
@@ -475,5 +475,40 @@ mod tests {
         ch.notify_of_acknowledge(2, clock.advance(Duration::from_millis(1)));
         assert_eq!(ch.queued_len(), 3);
         assert_eq!(ch.stats().actual_acknowledge_count, 1);
+    }
+
+    /// Across consecutive ticks WITHOUT acknowledgement, the number of unacknowledged
+    /// packets in flight must never exceed `max_queued_outgoing`. (Regression: the window
+    /// ceiling was computed relative to the already-advanced dispatch index, so each tick
+    /// admitted another full window -> unbounded in-flight growth -> client RCVBUF overflow.)
+    #[test]
+    fn window_does_not_grow_across_ticks_without_ack() {
+        let mut clock = Clock::new();
+        let mut ch = new_channel(&clock);
+
+        // Enqueue far more than one window's worth of fragments.
+        let fragment_count = FRAGMENT_WINDOW_SIZE * 4;
+        let packet_length = MAX_DATA_LENGTH - 4 + MAX_DATA_LENGTH * (fragment_count - 1);
+        let packet = generate_packet(packet_length);
+        ch.enqueue_data(&packet);
+
+        // Tick 1: a full window goes out.
+        ch.run_tick(clock.advance(Duration::from_millis(1)));
+        let mut in_flight = ch.take_outgoing().len();
+        assert_eq!(
+            in_flight, FRAGMENT_WINDOW_SIZE,
+            "first tick should send exactly one window"
+        );
+
+        // Several more ticks, no ack, well within ack_wait: nothing new may be sent
+        // because the window is still full of unacknowledged packets.
+        for _ in 0..5 {
+            ch.run_tick(clock.advance(Duration::from_millis(10)));
+            in_flight += ch.take_outgoing().len();
+            assert!(
+                in_flight <= FRAGMENT_WINDOW_SIZE,
+                "in-flight unacked packets ({in_flight}) exceeded the window ({FRAGMENT_WINDOW_SIZE})",
+            );
+        }
     }
 }
