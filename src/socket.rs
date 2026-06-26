@@ -27,7 +27,8 @@ use crate::packet_utils::read_op_code;
 use crate::packets::RemapConnection;
 use crate::protocol::{DisconnectReason, OpCode};
 use crate::session::{
-    ApplicationParameters, SessionEvent, SessionMode, SessionParameters, SessionState, SoeSession,
+    ApplicationParameters, Channel, SessionEvent, SessionMode, SessionParameters, SessionState,
+    SoeSession,
 };
 
 /// A driver-agnostic surface for managing SOE sessions over a UDP socket.
@@ -53,6 +54,10 @@ pub trait SoeSocket {
     /// Enqueues application data to be sent reliably to `remote`. Returns `false` if
     /// there is no running session for that address.
     fn enqueue_data(&mut self, remote: &SocketAddr, data: &[u8]) -> bool;
+
+    /// Enqueues application data to be sent to `remote` on the given channel. Returns
+    /// `false` if there is no running session for that address.
+    fn enqueue_data_on(&mut self, remote: &SocketAddr, data: &[u8], channel: Channel) -> bool;
 
     /// Terminates the session with `remote`, notifying the remote party.
     fn terminate(&mut self, remote: &SocketAddr, reason: DisconnectReason);
@@ -103,6 +108,8 @@ pub enum SocketEvent<A> {
         remote: A,
         /// The received application data.
         data: Bytes,
+        /// Whether the data arrived on the reliable or unreliable channel.
+        channel: Channel,
     },
     /// A session with `remote` has terminated for the given reason.
     SessionClosed {
@@ -169,8 +176,15 @@ impl<A: RemoteAddr> SoeMultiplexer<A> {
     /// there is no running session for that address.
     #[must_use = "a false return means the data was dropped because no running session exists for the address"]
     pub fn enqueue_data(&mut self, remote: &A, data: &[u8]) -> bool {
+        self.enqueue_data_on(remote, data, Channel::Reliable(0))
+    }
+
+    /// Enqueues application data to be sent to `remote` on the given channel. Returns
+    /// `false` if there is no running session for that address.
+    #[must_use = "a false return means the data was dropped because no running session exists for the address"]
+    pub fn enqueue_data_on(&mut self, remote: &A, data: &[u8], channel: Channel) -> bool {
         let queued = match self.sessions.get_mut(remote) {
-            Some(session) => session.enqueue_data(data),
+            Some(session) => session.enqueue_data_on(data, channel),
             None => false,
         };
         self.drain_session(remote);
@@ -326,10 +340,11 @@ impl<A: RemoteAddr> SoeMultiplexer<A> {
             }
         }
 
-        for data in session.take_received() {
+        for received in session.take_received() {
             events.push(SocketEvent::DataReceived {
                 remote: remote.clone(),
-                data,
+                data: received.data,
+                channel: received.channel,
             });
         }
 
@@ -473,14 +488,14 @@ mod tests {
         pump(&mut client, &mut server);
         assert!(server.take_events().iter().any(|e| matches!(
             e,
-            SocketEvent::DataReceived { remote, data } if *remote == addr(CLIENT) && data == "ping"
+            SocketEvent::DataReceived { remote, data, .. } if *remote == addr(CLIENT) && data == "ping"
         )));
 
         assert!(server.enqueue_data(&addr(CLIENT), b"pong"));
         pump(&mut client, &mut server);
         assert!(client.take_events().iter().any(|e| matches!(
             e,
-            SocketEvent::DataReceived { remote, data } if *remote == addr(SERVER) && data == "pong"
+            SocketEvent::DataReceived { remote, data, .. } if *remote == addr(SERVER) && data == "pong"
         )));
     }
 
@@ -503,7 +518,7 @@ mod tests {
         pump(&mut client, &mut server);
         assert!(server.take_events().iter().any(|e| matches!(
             e,
-            SocketEvent::DataReceived { remote, data }
+            SocketEvent::DataReceived { remote, data, .. }
                 if *remote == addr(CLIENT) && data.as_ref() == payload.as_slice()
         )));
     }

@@ -51,7 +51,7 @@ fn ping_pong_over_real_udp() {
         client.drive(&mut client_sock, now).unwrap();
 
         for event in server.take_events() {
-            if let SocketEvent::DataReceived { remote, data } = event {
+            if let SocketEvent::DataReceived { remote, data, .. } = event {
                 assert_eq!(data, format!("ping {server_echoes}").as_bytes());
                 server_echoes += 1;
                 // Echo the ping straight back.

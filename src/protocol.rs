@@ -44,10 +44,16 @@ impl OpCode {
             0x06 => Self::Heartbeat,
             0x07 => Self::NetStatusRequest,
             0x08 => Self::NetStatusResponse,
-            0x09 => Self::ReliableData,
-            0x0D => Self::ReliableDataFragment,
-            0x11 => Self::Acknowledge,
-            0x15 => Self::AcknowledgeAll,
+            // The four reliable channels occupy contiguous opcode ranges: the low two
+            // bits are the channel index (0..=3). `from_u16` collapses each range to
+            // its base *kind*; the channel index is recovered separately via
+            // [`crate::packet_utils::reliable_channel`]. As a result the mapping is not
+            // round-trippable through `as_u16` for channels 1..=3 — callers that need
+            // the wire opcode add the channel index to the base value themselves.
+            0x09..=0x0C => Self::ReliableData,
+            0x0D..=0x10 => Self::ReliableDataFragment,
+            0x11..=0x14 => Self::Acknowledge,
+            0x15..=0x18 => Self::AcknowledgeAll,
             0x1D => Self::UnknownSender,
             0x1E => Self::RemapConnection,
             _ => return None,

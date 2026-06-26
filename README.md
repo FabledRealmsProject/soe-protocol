@@ -2,8 +2,7 @@
 
 [![Build and Check](https://github.com/yungcomputerchair/soe-protocol/actions/workflows/rust.yml/badge.svg?branch=main)](https://github.com/yungcomputerchair/soe-protocol/actions/workflows/rust.yml)
 
-A Rust implementation of version 3 of the **SOE** (Sony Online Entertainment) network
-protocol.
+A Rust implementation of the **SOE** (Sony Online Entertainment) network protocol.
 
 SOE is a UDP transport layer used by a number of games (Free Realms, H1Z1, Landmark,
 PlanetSide 2, and others). On top of raw UDP it adds:
@@ -15,7 +14,7 @@ PlanetSide 2, and others). On top of raw UDP it adds:
 - **Optional compression** (zlib) of contextual packets.
 - **Optional encryption** (RC4) of application data.
 
-This implementation is an AI-assisted port informed by the public C# and Zig implementations in
+This implementation is an AI-assisted port informed by the public v3 C# and Zig implementations in
 [Sanctuary.SoeProtocol](https://github.com/PS2Sanctuary/Sanctuary.SoeProtocol).
 
 While porting, the protocol behaviour was re-derived from the reference rather than
@@ -41,6 +40,13 @@ copied, which surfaced a few improvements over it:
   state redacted), data-enqueue calls are `#[must_use]` so dropped payloads can't pass
   silently, and the parse paths are exercised by an end-to-end fuzz suite and the ported
   regression tests.
+
+On top of that, this crate adds some v2 protocol features for backwards compatibility with older games,
+with [SWG-Source](https://github.com/SWG-Source/src/tree/master/external/3rd/library/soePlatform/ChatAPI/utils/UdpLibrary)
+and [OSFR Sanctuary](https://github.com/Open-Source-Free-Realms/Sanctuary/tree/main/src/Sanctuary.UdpLibrary) used as references:
+
+- Opt-in unreliable data channel for lossy, unordered delivery of non-critical packets (e.g. movement updates).
+- Multiple (4) reliable data channels per session.
 
 ## Design: an I/O-agnostic core
 
@@ -74,12 +80,16 @@ for real-world I/O.
 
 ## Installation
 
-```toml
-[dependencies]
-soe-protocol = "0.1"
+In your project:
 
-# For the async (Tokio) adapters:
-soe-protocol = { version = "0.1", features = ["tokio"] }
+```
+cargo add soe-protocol
+```
+
+or, for the Tokio adapters:
+
+```
+cargo add soe-protocol --features tokio
 ```
 
 Requires Rust 1.88+ (edition 2024).
@@ -110,7 +120,7 @@ loop {
     for event in socket.step()? {
         match event {
             SocketEvent::SessionOpened { remote } => println!("opened {remote}"),
-            SocketEvent::DataReceived { remote, data } => {
+            SocketEvent::DataReceived { remote, data, .. } => {
                 socket.enqueue_data(&remote, &data); // echo it back
             }
             SocketEvent::SessionClosed { remote, reason } => println!("closed {remote}: {reason:?}"),
@@ -122,6 +132,43 @@ loop {
 
 To act as a client, call `socket.connect(server_addr)` instead of waiting for an
 inbound session.
+
+## Channels: reliable and unreliable delivery
+
+`enqueue_data` sends on reliable channel 0 — ordered, acknowledged, retransmitted, and
+(if a cipher is configured) encrypted. That is the right default for anything that must
+arrive, but games also carry a firehose of state that is only useful if it is _fresh_:
+position, camera, and animation updates where a dropped packet should be discarded, not
+resent behind a head-of-line stall.
+
+For that, select the channel explicitly with `enqueue_data_on` (here `socket` is the
+`SoeMultiplexer`/adapter from the quick start, and `Channel` comes from the crate root):
+
+```rust
+use soe_protocol::Channel;
+
+// Best-effort: sent once, never acked, may be dropped or reordered, never encrypted.
+socket.enqueue_data_on(&remote, b"position update", Channel::Unreliable);
+
+// One of up to four independent reliable channels (0..=3), each with its own
+// sequence space and cipher stream. `Reliable(0)` is what `enqueue_data` uses.
+socket.enqueue_data_on(&remote, b"chat message", Channel::Reliable(1));
+```
+
+Received data is tagged with the channel it arrived on, so a peer can route or
+prioritise by delivery class:
+
+```rust
+SocketEvent::DataReceived { remote, data, channel } => match channel {
+    Channel::Reliable(n) => { /* ordered application data on channel n */ }
+    Channel::Unreliable => { /* best-effort; safe to drop if stale */ }
+}
+```
+
+Unreliable data that would exceed the remote's maximum UDP payload is transparently
+promoted to reliable channel 0 (matching the reference UdpLibrary), so a large "best
+effort" message is never silently dropped for being too big. The four reliable channels
+are created lazily on first use; most sessions only ever touch channel 0.
 
 ## Writing a game server
 
@@ -168,7 +215,7 @@ async fn main() -> std::io::Result<()> {
                 clients.insert(remote, tx);
                 tokio::spawn(client_task(remote, server.handle(), rx));
             }
-            SocketEvent::DataReceived { remote, data } => {
+            SocketEvent::DataReceived { remote, data, .. } => {
                 if let Some(tx) = clients.get(&remote) {
                     let _ = tx.send(data); // route to that client's task
                 }
@@ -189,10 +236,11 @@ async fn client_task(remote: SocketAddr, handle: SoeHandle, mut inbound: mpsc::U
 }
 ```
 
-`SoeHandle` is `Clone`/`Send` and exposes `connect`, `enqueue_data`, and `terminate`;
-all are non-blocking and simply post a command to the driver loop. Events are received
-in an order that guarantees a session's `SessionOpened` is surfaced **before** any of
-its `DataReceived`, and `SessionClosed` **after** — so per-session state (like the task
+`SoeHandle` is `Clone`/`Send` and exposes `connect`, `enqueue_data`,
+`enqueue_data_on` (to pick a channel, as above), and `terminate`; all are non-blocking
+and simply post a command to the driver loop. Events are received in an order that
+guarantees a session's `SessionOpened` is surfaced **before** any of its
+`DataReceived`, and `SessionClosed` **after** — so per-session state (like the task
 spawned above) is always in place before that session's data arrives.
 
 ### Scaling across cores
@@ -207,11 +255,11 @@ server owns its own socket and `SoeMultiplexer`, this requires no changes to the
 
 Runnable examples live in [`examples/`](examples/):
 
-| Example                       | Feature  | Description                                        |
-| ----------------------------- | -------- | -------------------------------------------------- |
-| `server-sync` / `client-sync` | —        | Blocking, std-only echo server and ping client.    |
-| `server-tokio` / `client-tokio` | `tokio` | Async echo server and ping client.               |
-| `server-actor`                | `tokio`  | Game-server skeleton: per-client-task fan-out.     |
+| Example                         | Feature | Description                                     |
+| ------------------------------- | ------- | ----------------------------------------------- |
+| `server-sync` / `client-sync`   | —       | Blocking, std-only echo server and ping client. |
+| `server-tokio` / `client-tokio` | `tokio` | Async echo server and ping client.              |
+| `server-actor`                  | `tokio` | Game-server skeleton: per-client-task fan-out.  |
 
 Run a ping-pong over real UDP:
 

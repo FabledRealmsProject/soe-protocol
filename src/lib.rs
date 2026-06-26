@@ -97,7 +97,8 @@ pub use error::{Error, Result};
 pub use protocol::{DisconnectReason, OpCode};
 pub use rc4::Rc4KeyState;
 pub use session::{
-    ApplicationParameters, SessionEvent, SessionMode, SessionParameters, SessionState, SoeSession,
+    ApplicationParameters, Channel, ReceivedData, SessionEvent, SessionMode, SessionParameters,
+    SessionState, SoeSession,
 };
 pub use socket::{RemoteAddr, SocketConfig, SocketEvent, SoeMultiplexer, SoeSocket, UdpTransport};
 pub use sync_rt::SyncSoeSocket;

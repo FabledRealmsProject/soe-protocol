@@ -24,7 +24,10 @@ use crate::constants::{
 };
 use crate::crc32::Crc32;
 use crate::io::{BinaryReader, BinaryWriter};
-use crate::packet_utils::{ValidationResult, append_crc, read_op_code, validate_packet};
+use crate::packet_utils::{
+    RELIABLE_CHANNEL_COUNT, ValidationResult, append_crc, read_op_code, reliable_channel,
+    validate_packet,
+};
 use crate::packets::{Acknowledge, AcknowledgeAll, Disconnect, SessionRequest, SessionResponse};
 use crate::protocol::{DisconnectReason, OpCode};
 use crate::rc4::Rc4KeyState;
@@ -62,6 +65,37 @@ pub enum SessionEvent {
     Opened,
     /// The session has terminated for the given reason.
     Closed(DisconnectReason),
+}
+
+/// The channel a unit of application data is sent on (or was received on).
+///
+/// SOE multiplexes application data over several kinds of channel: up to
+/// [`RELIABLE_CHANNEL_COUNT`] independent ordered, lossless **reliable** channels
+/// (each acknowledged and retransmitted, with its own sequence space and cipher
+/// stream), and a single best-effort **unreliable** channel (sent once, never
+/// acked, may be dropped or reordered). The reliable channel index lets callers
+/// fan independent reliable streams across the four channels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Channel {
+    /// Ordered, acknowledged, retransmitted delivery on the reliable channel with the
+    /// given index. Each channel has its own independent sequence space and cipher
+    /// stream. The index must be `< RELIABLE_CHANNEL_COUNT`; data on an out-of-range
+    /// channel is dropped. RC4-encrypted if a cipher is configured.
+    Reliable(usize),
+    /// Best-effort delivery: sent once, never acknowledged, may be lost or reordered
+    /// (the SOE unreliable channel). Application data is **not** RC4-encrypted on this
+    /// channel, since a continuous stream cipher cannot tolerate loss or reordering.
+    Unreliable,
+}
+
+/// A unit of application data received from the remote, tagged with the channel it
+/// arrived on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceivedData {
+    /// The received application data.
+    pub data: Bytes,
+    /// Which channel the data arrived on.
+    pub channel: Channel,
 }
 
 /// Parameters controlling a session. Mutated during negotiation as the two parties
@@ -153,8 +187,13 @@ pub struct SoeSession {
     state: SessionState,
     params: SessionParameters,
 
-    input: ReliableDataInputChannel,
-    output: ReliableDataOutputChannel,
+    /// Per-channel reliable input/output, created lazily on first use (matching the
+    /// reference UdpLibrary). `cipher` is the pristine initial RC4 key state, cloned
+    /// into each channel as it is created so every channel runs an independent stream
+    /// seeded from the same key.
+    inputs: [Option<ReliableDataInputChannel>; RELIABLE_CHANNEL_COUNT],
+    outputs: [Option<ReliableDataOutputChannel>; RELIABLE_CHANNEL_COUNT],
+    cipher: Option<Rc4KeyState>,
 
     session_id: u32,
     termination_reason: DisconnectReason,
@@ -165,7 +204,7 @@ pub struct SoeSession {
     rng: Lcg,
 
     outgoing: Vec<Bytes>,
-    received: Vec<Bytes>,
+    received: Vec<ReceivedData>,
     events: Vec<SessionEvent>,
 }
 
@@ -182,34 +221,14 @@ impl SoeSession {
         rng_seed: u64,
         now: Instant,
     ) -> Self {
-        let input = ReliableDataInputChannel::new(
-            InputConfig {
-                max_queued_incoming: params.max_queued_incoming_reliable,
-                acknowledge_all_data: params.acknowledge_all_data,
-                data_ack_window: params.data_ack_window,
-                max_ack_delay: params.max_ack_delay,
-            },
-            app.encryption_key_state.clone(),
-            now,
-        );
-
-        let mut output = ReliableDataOutputChannel::new(
-            OutputConfig {
-                max_data_length: Self::max_data_length(&params),
-                max_queued_outgoing: params.max_queued_outgoing_reliable as usize,
-                ack_wait: DEFAULT_ACK_WAIT,
-            },
-            app.encryption_key_state.clone(),
-            now,
-        );
-        output.set_max_data_length(Self::max_data_length(&params));
-
+        let _ = now;
         Self {
             mode,
             state: SessionState::Negotiating,
             params,
-            input,
-            output,
+            inputs: std::array::from_fn(|_| None),
+            outputs: std::array::from_fn(|_| None),
+            cipher: app.encryption_key_state,
             session_id: 0,
             termination_reason: DisconnectReason::None,
             terminated_by_remote: false,
@@ -257,8 +276,9 @@ impl SoeSession {
         std::mem::take(&mut self.outgoing)
     }
 
-    /// Drains application data received from the remote.
-    pub fn take_received(&mut self) -> Vec<Bytes> {
+    /// Drains application data received from the remote, each tagged with the channel
+    /// (reliable or unreliable) it arrived on.
+    pub fn take_received(&mut self) -> Vec<ReceivedData> {
         std::mem::take(&mut self.received)
     }
 
@@ -272,6 +292,45 @@ impl SoeSession {
             - OP_CODE_SIZE
             - params.is_compression_enabled as usize
             - params.crc_length as usize
+    }
+
+    /// Returns a mutable reference to the reliable input channel `ch`, creating it
+    /// (with a fresh clone of the initial cipher) on first use. Reliable channels are
+    /// only created once the session is running, so `self.params` is fully negotiated
+    /// by the time a channel is built.
+    fn input_channel(&mut self, ch: usize, now: Instant) -> &mut ReliableDataInputChannel {
+        if self.inputs[ch].is_none() {
+            let config = InputConfig {
+                max_queued_incoming: self.params.max_queued_incoming_reliable,
+                acknowledge_all_data: self.params.acknowledge_all_data,
+                data_ack_window: self.params.data_ack_window,
+                max_ack_delay: self.params.max_ack_delay,
+            };
+            self.inputs[ch] = Some(ReliableDataInputChannel::new(
+                config,
+                self.cipher.clone(),
+                now,
+            ));
+        }
+        self.inputs[ch].as_mut().expect("input channel created")
+    }
+
+    /// Returns a mutable reference to the reliable output channel `ch`, creating it
+    /// (with a fresh clone of the initial cipher) on first use.
+    fn output_channel(&mut self, ch: usize, now: Instant) -> &mut ReliableDataOutputChannel {
+        if self.outputs[ch].is_none() {
+            let config = OutputConfig {
+                max_data_length: Self::max_data_length(&self.params),
+                max_queued_outgoing: self.params.max_queued_outgoing_reliable as usize,
+                ack_wait: DEFAULT_ACK_WAIT,
+            };
+            self.outputs[ch] = Some(ReliableDataOutputChannel::new(
+                config,
+                self.cipher.clone(),
+                now,
+            ));
+        }
+        self.outputs[ch].as_mut().expect("output channel created")
     }
 
     /// Sends a [`SessionRequest`] to begin negotiation. Only valid in client mode
@@ -300,10 +359,51 @@ impl SoeSession {
     /// is not running.
     #[must_use = "a false return means the data was dropped because the session is not running"]
     pub fn enqueue_data(&mut self, data: &[u8]) -> bool {
+        self.enqueue_data_on(data, Channel::Reliable(0))
+    }
+
+    /// Enqueues application data to be sent on the given channel. Returns `false` if
+    /// the session is not running, or if a [`Channel::Reliable`] index is out of range
+    /// (`>= RELIABLE_CHANNEL_COUNT`); in both cases the data is dropped.
+    ///
+    /// [`Channel::Reliable`] data is sequenced, acknowledged and retransmitted (and
+    /// RC4-encrypted if a cipher is configured), independently per channel index.
+    /// [`Channel::Unreliable`] data is sent once as a raw SOE packet — no sequence, no
+    /// acknowledgement, no encryption — and zero-escaped if it begins with a `0x00`
+    /// byte. Unreliable data that would exceed the remote's maximum UDP payload is
+    /// transparently promoted to reliable channel 0, mirroring the reference
+    /// UdpLibrary.
+    #[must_use = "a false return means the data was dropped because the session is not running"]
+    pub fn enqueue_data_on(&mut self, data: &[u8], channel: Channel) -> bool {
         if self.state != SessionState::Running {
             return false;
         }
-        self.output.enqueue_data(data);
+        match channel {
+            Channel::Reliable(ch) => {
+                if ch >= RELIABLE_CHANNEL_COUNT {
+                    return false;
+                }
+                self.output_channel(ch, self.last_received)
+                    .enqueue_data(data);
+            }
+            Channel::Unreliable => {
+                if data.is_empty() {
+                    return true;
+                }
+                // A raw unreliable packet carries no sequence; the escape byte (if any)
+                // and the CRC are the only framing overhead.
+                let escape = (data[0] == 0) as usize;
+                let framed_len = escape + data.len() + self.params.crc_length as usize;
+                if framed_len > self.params.remote_udp_length as usize {
+                    // Too large to send raw; the reference library promotes it to reliable.
+                    self.output_channel(0, self.last_received)
+                        .enqueue_data(data);
+                } else {
+                    let dg = self.frame_unreliable(data);
+                    self.outgoing.push(dg);
+                }
+            }
+        }
         true
     }
 
@@ -327,6 +427,14 @@ impl SoeSession {
         );
 
         if result != ValidationResult::Valid {
+            // A packet with no recognised OP code may be an unreliable application
+            // packet, which carries its payload raw (no OP code). Only an unknown OP
+            // code is treated this way; genuine corruption (CRC/length) still
+            // terminates the session.
+            if result == ValidationResult::InvalidOpCode && self.handle_unreliable(&datagram, now) {
+                self.flush_channels(now);
+                return;
+            }
             self.terminate_inner(DisconnectReason::CorruptPacket, true, false, now);
             return;
         }
@@ -345,9 +453,11 @@ impl SoeSession {
         if op.is_contextless() {
             self.handle_contextless(op, &body, now);
         } else {
+            let raw_op = u16::from_be_bytes([datagram[0], datagram[1]]);
+            let channel = reliable_channel(raw_op);
             let crc_length = self.params.crc_length as usize;
             let body = body.slice(..body.len() - crc_length);
-            self.handle_contextual(op, body, now);
+            self.handle_contextual(op, channel, body, now);
         }
 
         self.flush_channels(now);
@@ -369,8 +479,14 @@ impl SoeSession {
             return;
         }
 
-        self.input.run_tick(now);
-        self.output.run_tick(now);
+        for ch in 0..RELIABLE_CHANNEL_COUNT {
+            if let Some(input) = self.inputs[ch].as_mut() {
+                input.run_tick(now);
+            }
+            if let Some(output) = self.outputs[ch].as_mut() {
+                output.run_tick(now);
+            }
+        }
         self.flush_channels(now);
     }
 
@@ -417,8 +533,6 @@ impl SoeSession {
 
         self.params.crc_length = CRC_LENGTH;
         self.params.crc_seed = self.rng.next_u32();
-        self.output
-            .set_max_data_length(Self::max_data_length(&self.params));
 
         let response = SessionResponse {
             session_id: self.session_id,
@@ -469,14 +583,12 @@ impl SoeSession {
         self.params.crc_seed = response.crc_seed;
         self.params.is_compression_enabled = response.is_compression_enabled;
         self.session_id = response.session_id;
-        self.output
-            .set_max_data_length(Self::max_data_length(&self.params));
 
         self.state = SessionState::Running;
         self.events.push(SessionEvent::Opened);
     }
 
-    fn handle_contextual(&mut self, op: OpCode, body: Bytes, now: Instant) {
+    fn handle_contextual(&mut self, op: OpCode, channel: usize, body: Bytes, now: Instant) {
         let body = if self.params.is_compression_enabled {
             if body.is_empty() {
                 return;
@@ -498,10 +610,10 @@ impl SoeSession {
             body
         };
 
-        self.handle_contextual_inner(op, body, now);
+        self.handle_contextual_inner(op, channel, body, now);
     }
 
-    fn handle_contextual_inner(&mut self, op: OpCode, body: Bytes, now: Instant) {
+    fn handle_contextual_inner(&mut self, op: OpCode, channel: usize, body: Bytes, now: Instant) {
         match op {
             OpCode::MultiPacket => {
                 let mut offset = 0;
@@ -523,6 +635,7 @@ impl SoeSession {
                     }
 
                     let sub = body.slice(offset..offset + len);
+                    let sub_raw = u16::from_be_bytes([sub[0], sub[1]]);
                     let sub_op = match read_op_code(&sub) {
                         Some(o) => o,
                         None => {
@@ -530,7 +643,13 @@ impl SoeSession {
                             return;
                         }
                     };
-                    self.handle_contextual_inner(sub_op, sub.slice(OP_CODE_SIZE..), now);
+                    let sub_channel = reliable_channel(sub_raw);
+                    self.handle_contextual_inner(
+                        sub_op,
+                        sub_channel,
+                        sub.slice(OP_CODE_SIZE..),
+                        now,
+                    );
                     offset += len;
 
                     // A sub-packet may have terminated the session (e.g. a corrupt
@@ -551,25 +670,31 @@ impl SoeSession {
                 self.outgoing.push(dg);
             }
             OpCode::ReliableData => {
-                let outcome = self.input.handle_reliable_data(body, now);
+                let outcome = self
+                    .input_channel(channel, now)
+                    .handle_reliable_data(body, now);
                 if outcome.is_err() {
                     self.terminate_inner(DisconnectReason::CorruptPacket, true, false, now);
                 }
             }
             OpCode::ReliableDataFragment => {
-                let outcome = self.input.handle_reliable_data_fragment(body, now);
+                let outcome = self
+                    .input_channel(channel, now)
+                    .handle_reliable_data_fragment(body, now);
                 if outcome.is_err() {
                     self.terminate_inner(DisconnectReason::CorruptPacket, true, false, now);
                 }
             }
             OpCode::Acknowledge => {
                 if let Ok(ack) = Acknowledge::deserialize(&body) {
-                    self.output.notify_of_acknowledge(ack.sequence, now);
+                    self.output_channel(channel, now)
+                        .notify_of_acknowledge(ack.sequence, now);
                 }
             }
             OpCode::AcknowledgeAll => {
                 if let Ok(ack) = AcknowledgeAll::deserialize(&body) {
-                    self.output.notify_of_acknowledge_all(ack.sequence, now);
+                    self.output_channel(channel, now)
+                        .notify_of_acknowledge_all(ack.sequence, now);
                 }
             }
             _ => {}
@@ -589,25 +714,132 @@ impl SoeSession {
     }
 
     fn flush_channels(&mut self, _now: Instant) {
-        for ack in self.input.take_outgoing() {
-            let payload = ack.sequence.to_be_bytes();
-            let dg = self.frame_contextual(ack.op_code, &payload);
-            self.outgoing.push(dg);
+        for ch in 0..RELIABLE_CHANNEL_COUNT {
+            // Acknowledgements emitted by the input channel, framed with this
+            // channel's opcode (base kind + channel index).
+            let acks = self.inputs[ch]
+                .as_mut()
+                .map(|input| input.take_outgoing())
+                .unwrap_or_default();
+            for ack in acks {
+                let payload = ack.sequence.to_be_bytes();
+                let raw = ack.op_code.as_u16() + ch as u16;
+                let dg = self.frame_contextual_raw(raw, &payload);
+                self.outgoing.push(dg);
+            }
+
+            let packets = self.outputs[ch]
+                .as_mut()
+                .map(|output| output.take_outgoing())
+                .unwrap_or_default();
+            for packet in packets {
+                let raw = packet.op_code.as_u16() + ch as u16;
+                let dg = self.frame_contextual_raw(raw, &packet.payload);
+                self.outgoing.push(dg);
+            }
+
+            let app_data = self.inputs[ch]
+                .as_mut()
+                .map(|input| input.take_app_data())
+                .unwrap_or_default();
+            for data in app_data {
+                self.received.push(ReceivedData {
+                    data,
+                    channel: Channel::Reliable(ch),
+                });
+            }
+        }
+    }
+
+    /// Attempts to handle `datagram` as an unreliable application packet (one whose
+    /// leading byte is non-zero, or a zero-escaped packet). Returns `true` if it was
+    /// consumed (delivered or dropped as a best-effort packet), or `false` if it is
+    /// not a valid unreliable packet and the caller should treat it as corruption.
+    fn handle_unreliable(&mut self, datagram: &Bytes, now: Instant) -> bool {
+        // Unreliable data is only meaningful on a running session; during negotiation
+        // an unknown OP code is genuine corruption.
+        if self.state != SessionState::Running {
+            return false;
         }
 
-        for packet in self.output.take_outgoing() {
-            let dg = self.frame_contextual(packet.op_code, &packet.payload);
-            self.outgoing.push(dg);
+        let crc_length = self.params.crc_length as usize;
+        // Need at least one body byte plus the trailing CRC.
+        if datagram.len() < crc_length + 1 {
+            return false;
         }
 
-        for data in self.input.take_app_data() {
-            self.received.push(data);
+        // The CRC covers the whole datagram. A mismatch on a best-effort packet is
+        // dropped rather than fatal (it may be wire corruption or a stray datagram),
+        // so report it as consumed.
+        if crc_length > 0 {
+            let split = datagram.len() - crc_length;
+            let crc = Crc32::new(self.params.crc_seed);
+            let expected = crc.hash(&datagram[..split]).to_be_bytes();
+            if expected[4 - crc_length..] != datagram[split..] {
+                return true;
+            }
         }
+
+        let body = datagram.slice(..datagram.len() - crc_length);
+        let payload = if body[0] == 0 {
+            // The only unreliable packet whose first byte is zero is a zero-escaped
+            // one: a single 0x00 escape byte prefixing a payload that itself began
+            // with 0x00. Anything else with a zero lead byte is an unknown control
+            // packet, i.e. corruption.
+            if body.len() < 2 || body[1] != 0 {
+                return false;
+            }
+            body.slice(1..)
+        } else {
+            body
+        };
+
+        self.last_received = now;
+        if self.open_session_on_next_packet {
+            self.events.push(SessionEvent::Opened);
+            self.open_session_on_next_packet = false;
+        }
+        self.received.push(ReceivedData {
+            data: payload,
+            channel: Channel::Unreliable,
+        });
+        true
+    }
+
+    /// Frames an unreliable packet: the raw payload (zero-escaped if it begins with a
+    /// `0x00` byte) followed by the CRC. Unreliable data carries no OP code, sequence,
+    /// compression flag or encryption.
+    fn frame_unreliable(&self, payload: &[u8]) -> Bytes {
+        let escape = payload[0] == 0;
+        let crc_length = self.params.crc_length as usize;
+        let capacity = escape as usize + payload.len() + crc_length;
+
+        let mut buf = vec![0u8; capacity];
+        let written = {
+            let mut w = BinaryWriter::new(&mut buf);
+            if escape {
+                w.write_u8(0).expect("escape byte");
+            }
+            w.write_bytes(payload).expect("payload");
+            w.offset()
+        };
+
+        let crc = Crc32::new(self.params.crc_seed);
+        let total = append_crc(&mut buf, written, &crc, self.params.crc_length).expect("crc");
+        buf.truncate(total);
+        Bytes::from(buf)
     }
 
     /// Frames a contextual packet: OP code, optional compression flag, payload, and
     /// CRC.
     fn frame_contextual(&self, op: OpCode, payload: &[u8]) -> Bytes {
+        self.frame_contextual_raw(op.as_u16(), payload)
+    }
+
+    /// Frames a contextual packet from a raw 16-bit opcode. Used by the per-channel
+    /// flush path, where the wire opcode is the base kind plus the channel index and
+    /// so cannot be expressed as a single [`OpCode`] variant.
+    fn frame_contextual_raw(&self, raw_op: u16, payload: &[u8]) -> Bytes {
         let compression = self.params.is_compression_enabled as usize;
         let crc_length = self.params.crc_length as usize;
         let capacity = OP_CODE_SIZE + compression + payload.len() + crc_length;
@@ -615,7 +847,7 @@ impl SoeSession {
         let mut buf = vec![0u8; capacity];
         let written = {
             let mut w = BinaryWriter::new(&mut buf);
-            w.write_u16(op.as_u16()).expect("op code");
+            w.write_u16(raw_op).expect("op code");
             if self.params.is_compression_enabled {
                 w.write_bool(false).expect("compression flag");
             }
@@ -640,8 +872,12 @@ impl SoeSession {
             return;
         }
 
-        // Naive flush of the output channel.
-        self.output.run_tick(now);
+        // Naive flush of the output channels.
+        for ch in 0..RELIABLE_CHANNEL_COUNT {
+            if let Some(output) = self.outputs[ch].as_mut() {
+                output.run_tick(now);
+            }
+        }
         self.flush_channels(now);
         self.termination_reason = reason;
 
@@ -798,8 +1034,8 @@ mod tests {
 
         let received = server.take_received();
         assert_eq!(received.len(), 2);
-        assert_eq!(&received[0][..], &small[..]);
-        assert_eq!(&received[1][..], &large[..]);
+        assert_eq!(&received[0].data[..], &small[..]);
+        assert_eq!(&received[1].data[..], &large[..]);
     }
 
     #[test]
@@ -816,8 +1052,149 @@ mod tests {
         server.run_tick(now);
         pump(&mut client, &mut server, now);
 
-        assert_eq!(&server.take_received()[0][..], &to_server[..]);
-        assert_eq!(&client.take_received()[0][..], &to_client[..]);
+        assert_eq!(&server.take_received()[0].data[..], &to_server[..]);
+        assert_eq!(&client.take_received()[0].data[..], &to_client[..]);
+    }
+
+    #[test]
+    fn round_trips_unreliable_data() {
+        let now = Instant::now();
+        let (mut client, mut server) = negotiate(now);
+
+        // A payload whose first byte is non-zero is sent raw, with no OP code.
+        let payload = [0x42u8, 1, 2, 3, 4];
+        assert!(client.enqueue_data_on(&payload, Channel::Unreliable));
+        pump(&mut client, &mut server, now);
+
+        let received = server.take_received();
+        assert_eq!(received.len(), 1);
+        assert_eq!(&received[0].data[..], &payload[..]);
+        assert_eq!(received[0].channel, Channel::Unreliable);
+        // An unreliable packet is never acknowledged, so nothing flows back.
+        assert!(client.take_received().is_empty());
+        assert_eq!(server.state(), SessionState::Running);
+    }
+
+    #[test]
+    fn round_trips_zero_escaped_unreliable_data() {
+        let now = Instant::now();
+        let (mut client, mut server) = negotiate(now);
+
+        // A payload that begins with 0x00 must be zero-escaped on the wire, then
+        // reconstructed exactly on receipt.
+        let payload = [0x00u8, 0x09, 0xff, 0x00];
+        assert!(client.enqueue_data_on(&payload, Channel::Unreliable));
+        pump(&mut client, &mut server, now);
+
+        let received = server.take_received();
+        assert_eq!(received.len(), 1);
+        assert_eq!(&received[0].data[..], &payload[..]);
+        assert_eq!(received[0].channel, Channel::Unreliable);
+        assert_eq!(server.state(), SessionState::Running);
+    }
+
+    #[test]
+    fn inbound_unreliable_does_not_terminate_session() {
+        let now = Instant::now();
+        let (mut client, mut server) = negotiate(now);
+
+        // Before this change, an inbound packet with no recognised OP code (a non-zero
+        // lead byte) tore the session down with CorruptPacket. It must now be delivered.
+        assert!(client.enqueue_data_on(b"\x05hello world", Channel::Unreliable));
+        pump(&mut client, &mut server, now);
+
+        assert_eq!(server.state(), SessionState::Running);
+        assert_eq!(server.take_received().len(), 1);
+        // The only event is the session opening on first contact; crucially, no
+        // CorruptPacket-driven Closed event.
+        assert!(
+            server
+                .take_events()
+                .iter()
+                .all(|e| matches!(e, SessionEvent::Opened))
+        );
+    }
+
+    #[test]
+    fn oversized_unreliable_is_promoted_to_reliable() {
+        let now = Instant::now();
+        let (mut client, mut server) = negotiate(now);
+
+        // Larger than the remote's UDP payload: must fall back to the reliable channel
+        // (which fragments) rather than be dropped, and must still be acknowledged.
+        let payload = generate(2000);
+        assert!(client.enqueue_data_on(&payload, Channel::Unreliable));
+        client.run_tick(now);
+        pump(&mut client, &mut server, now);
+
+        let received = server.take_received();
+        assert_eq!(received.len(), 1);
+        assert_eq!(&received[0].data[..], &payload[..]);
+        // Promotion means it travelled reliably.
+        assert_eq!(received[0].channel, Channel::Reliable(0));
+    }
+
+    #[test]
+    fn round_trips_data_on_multiple_reliable_channels() {
+        let now = Instant::now();
+        // Use an encrypted session so the test also proves each channel runs an
+        // independent RC4 stream cloned from the same initial key: output[ch] on the
+        // client stays in sync with input[ch] on the server only if the per-channel
+        // ciphers are seeded identically and advanced independently.
+        let key = Rc4KeyState::new(&[9, 8, 7, 6, 5]);
+        let app = ApplicationParameters {
+            encryption_key_state: Some(key),
+        };
+        let mut client = SoeSession::new(
+            SessionMode::Client,
+            params("TestProtocol"),
+            app.clone(),
+            1,
+            now,
+        );
+        let mut server = SoeSession::new(SessionMode::Server, params("TestProtocol"), app, 2, now);
+        client.send_session_request();
+        pump(&mut client, &mut server, now);
+
+        // Each reliable channel has its own sequence space and cipher stream; data sent
+        // on different channels must each arrive intact and be tagged with the channel
+        // it travelled on.
+        let on_zero = generate(1500);
+        let on_one = generate(800);
+        let on_three = generate(1200);
+
+        assert!(client.enqueue_data_on(&on_zero, Channel::Reliable(0)));
+        assert!(client.enqueue_data_on(&on_one, Channel::Reliable(1)));
+        assert!(client.enqueue_data_on(&on_three, Channel::Reliable(3)));
+        client.run_tick(now);
+        pump(&mut client, &mut server, now);
+
+        let mut received = server.take_received();
+        // Order across channels is not guaranteed; index by the channel tag.
+        received.sort_by_key(|r| match r.channel {
+            Channel::Reliable(ch) => ch,
+            Channel::Unreliable => usize::MAX,
+        });
+        assert_eq!(received.len(), 3);
+        assert_eq!(received[0].channel, Channel::Reliable(0));
+        assert_eq!(&received[0].data[..], &on_zero[..]);
+        assert_eq!(received[1].channel, Channel::Reliable(1));
+        assert_eq!(&received[1].data[..], &on_one[..]);
+        assert_eq!(received[2].channel, Channel::Reliable(3));
+        assert_eq!(&received[2].data[..], &on_three[..]);
+        assert_eq!(server.state(), SessionState::Running);
+    }
+
+    #[test]
+    fn enqueue_on_out_of_range_reliable_channel_is_dropped() {
+        let now = Instant::now();
+        let (mut client, _server) = negotiate(now);
+
+        // Channel indices are bounded by RELIABLE_CHANNEL_COUNT; an out-of-range index
+        // drops the data (reported via a `false` return) rather than panicking.
+        assert!(!client.enqueue_data_on(b"nope", Channel::Reliable(RELIABLE_CHANNEL_COUNT)));
+        client.run_tick(now);
+        assert!(client.take_outgoing().is_empty());
     }
 
     /// A `MultiPacket` bundle whose first sub-packet corrupts the session must not
@@ -848,13 +1225,16 @@ mod tests {
         body.push(sub2.len() as u8);
         body.extend_from_slice(&sub2);
 
-        server.handle_contextual_inner(OpCode::MultiPacket, Bytes::from(body), now);
+        server.handle_contextual_inner(OpCode::MultiPacket, 0, Bytes::from(body), now);
 
         assert_eq!(server.state(), SessionState::Terminated);
         assert_eq!(server.termination_reason(), DisconnectReason::CorruptPacket);
         // The second sub-packet must never have reached the input channel.
         assert!(
-            server.input.take_app_data().is_empty(),
+            server.inputs[0]
+                .as_mut()
+                .map(|c| c.take_app_data().is_empty())
+                .unwrap_or(true),
             "data after a terminating sub-packet was processed"
         );
     }
@@ -898,6 +1278,6 @@ mod tests {
         client.run_tick(now);
         pump(&mut client, &mut server, now);
 
-        assert_eq!(&server.take_received()[0][..], &data[..]);
+        assert_eq!(&server.take_received()[0].data[..], &data[..]);
     }
 }

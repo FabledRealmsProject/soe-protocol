@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 
 use crate::protocol::DisconnectReason;
+use crate::session::Channel;
 use crate::socket::{SocketConfig, SocketEvent, SoeMultiplexer, SoeSocket};
 
 /// Buffer size for a single received datagram. SOE UDP lengths default to 512 and
@@ -94,6 +95,10 @@ impl SoeSocket for SyncSoeSocket {
 
     fn enqueue_data(&mut self, remote: &SocketAddr, data: &[u8]) -> bool {
         self.mux.enqueue_data(remote, data)
+    }
+
+    fn enqueue_data_on(&mut self, remote: &SocketAddr, data: &[u8], channel: Channel) -> bool {
+        self.mux.enqueue_data_on(remote, data, channel)
     }
 
     fn terminate(&mut self, remote: &SocketAddr, reason: DisconnectReason) {

@@ -18,6 +18,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, Interval, MissedTickBehavior, interval};
 
 use crate::protocol::DisconnectReason;
+use crate::session::Channel;
 use crate::socket::{SocketConfig, SocketEvent, SoeMultiplexer, SoeSocket};
 
 /// Buffer size for a single received datagram. SOE UDP lengths default to 512 and
@@ -104,6 +105,10 @@ impl SoeSocket for TokioSoeSocket {
         self.mux.enqueue_data(remote, data)
     }
 
+    fn enqueue_data_on(&mut self, remote: &SocketAddr, data: &[u8], channel: Channel) -> bool {
+        self.mux.enqueue_data_on(remote, data, channel)
+    }
+
     fn terminate(&mut self, remote: &SocketAddr, reason: DisconnectReason) {
         self.mux.terminate(remote, reason, Instant::now());
     }
@@ -115,6 +120,7 @@ enum Command {
     EnqueueData {
         remote: SocketAddr,
         data: Bytes,
+        channel: Channel,
     },
     Terminate {
         remote: SocketAddr,
@@ -149,10 +155,25 @@ impl SoeHandle {
     /// whether a session for `remote` exists (that is determined asynchronously by
     /// the loop).
     pub fn enqueue_data(&self, remote: SocketAddr, data: impl Into<Bytes>) -> bool {
+        self.enqueue_data_on(remote, data, Channel::Reliable(0))
+    }
+
+    /// Enqueues application data to be sent to `remote` on the given channel.
+    ///
+    /// Returns `false` only if the driver loop has stopped; it does **not** report
+    /// whether a session for `remote` exists (that is determined asynchronously by
+    /// the loop).
+    pub fn enqueue_data_on(
+        &self,
+        remote: SocketAddr,
+        data: impl Into<Bytes>,
+        channel: Channel,
+    ) -> bool {
         self.commands
             .send(Command::EnqueueData {
                 remote,
                 data: data.into(),
+                channel,
             })
             .is_ok()
     }
@@ -279,11 +300,11 @@ async fn drive_loop(
             command = commands.recv() => {
                 match command {
                     Some(Command::Connect(remote)) => mux.connect(remote, Instant::now()),
-                    Some(Command::EnqueueData { remote, data }) => {
+                    Some(Command::EnqueueData { remote, data, channel }) => {
                         // Fire-and-forget: if no running session exists for `remote`
                         // the data is dropped (the handle API is intentionally async
                         // and can't synchronously report this).
-                        let _ = mux.enqueue_data(&remote, &data);
+                        let _ = mux.enqueue_data_on(&remote, &data, channel);
                     }
                     Some(Command::Terminate { remote, reason }) => {
                         mux.terminate(&remote, reason, Instant::now());

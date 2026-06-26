@@ -41,7 +41,7 @@ fn main() -> std::io::Result<()> {
                 SocketEvent::SessionClosed { remote, reason } => {
                     println!("server: session with {remote} closed ({reason:?})");
                 }
-                SocketEvent::DataReceived { remote, data } => {
+                SocketEvent::DataReceived { remote, data, .. } => {
                     let text = String::from_utf8_lossy(&data);
                     println!("server: received {:?} from {remote}, echoing", text);
                     socket.enqueue_data(&remote, &data);

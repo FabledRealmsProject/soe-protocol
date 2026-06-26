@@ -57,7 +57,7 @@ async fn main() -> std::io::Result<()> {
                     println!("client: session with {remote} closed ({reason:?})");
                     return Ok(());
                 }
-                SocketEvent::DataReceived { remote, data } => {
+                SocketEvent::DataReceived { remote, data, .. } => {
                     let text = String::from_utf8_lossy(&data);
                     println!("client: received echo {:?}", text);
                     tokio::time::sleep(Duration::from_secs(1)).await;

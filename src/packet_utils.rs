@@ -11,6 +11,11 @@ use crate::varint::multi_packet;
 
 const OP_CODE_SIZE: usize = 2;
 
+/// The number of independent reliable channels the protocol supports (matching the
+/// reference UdpLibrary's `cReliableChannelCount`). Each channel has its own
+/// sequence space, acknowledgements and (optionally) cipher stream.
+pub const RELIABLE_CHANNEL_COUNT: usize = 4;
+
 /// The result of validating that a buffer plausibly contains an SOE packet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValidationResult {
@@ -30,6 +35,20 @@ pub fn read_op_code(buffer: &[u8]) -> Option<OpCode> {
         return None;
     }
     OpCode::from_u16(u16::from_be_bytes([buffer[0], buffer[1]]))
+}
+
+/// Returns the reliable channel index (0..[`RELIABLE_CHANNEL_COUNT`]) encoded in a
+/// raw reliable/fragment/acknowledge opcode, or `0` for any other opcode. The four
+/// reliable channels occupy contiguous opcode ranges whose offset from the range
+/// base is the channel index.
+pub fn reliable_channel(raw: u16) -> usize {
+    match raw {
+        0x09..=0x0C => (raw - 0x09) as usize,
+        0x0D..=0x10 => (raw - 0x0D) as usize,
+        0x11..=0x14 => (raw - 0x11) as usize,
+        0x15..=0x18 => (raw - 0x15) as usize,
+        _ => 0,
+    }
 }
 
 /// Returns `true` if the OP code denotes a packet used within a session context.

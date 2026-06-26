@@ -57,7 +57,7 @@ async fn main() -> std::io::Result<()> {
                 clients.insert(remote, tx);
                 tokio::spawn(client_task(remote, server.handle(), rx));
             }
-            SocketEvent::DataReceived { remote, data } => {
+            SocketEvent::DataReceived { remote, data, .. } => {
                 // Route the datagram to that client's task. Drop if it has gone away.
                 if let Some(tx) = clients.get(&remote) {
                     let _ = tx.send(data);
