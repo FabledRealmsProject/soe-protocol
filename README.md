@@ -120,8 +120,8 @@ loop {
     for event in socket.step()? {
         match event {
             SocketEvent::SessionOpened { remote } => println!("opened {remote}"),
-            SocketEvent::DataReceived { remote, data, .. } => {
-                socket.enqueue_data(&remote, &data); // echo it back
+            SocketEvent::DataReceived { remote, data, channel } => {
+                socket.enqueue_data_on(&remote, &data, channel); // echo it back
             }
             SocketEvent::SessionClosed { remote, reason } => println!("closed {remote}: {reason:?}"),
         }
