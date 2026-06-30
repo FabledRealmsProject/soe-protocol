@@ -34,13 +34,8 @@ async fn main() -> std::io::Result<()> {
         ..SocketConfig::default()
     };
 
-    let mut client = TokioSoeClient::connect(
-        "127.0.0.1:0".parse().unwrap(),
-        server_addr,
-        config,
-        Duration::from_millis(5),
-    )
-    .await?;
+    let mut client =
+        TokioSoeClient::connect_to(server_addr, config, Duration::from_millis(5)).await?;
     println!(
         "client: bound to {}, connecting to {}",
         client.local_addr(),

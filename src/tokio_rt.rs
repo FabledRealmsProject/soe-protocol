@@ -8,7 +8,7 @@
 //! datagrams after each step.
 
 use std::io;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Instant;
 
 use bytes::Bytes;
@@ -431,9 +431,34 @@ pub struct TokioSoeClient {
 }
 
 impl TokioSoeClient {
+    /// Connects to `server`, binding the local socket to an OS-chosen ephemeral port
+    /// on the unspecified address of the server's IP family (`0.0.0.0` for IPv4,
+    /// `::` for IPv6).
+    ///
+    /// This is the convenient default for a client that doesn't care which local
+    /// interface or port it uses. To pin a specific local address (e.g. on a
+    /// multi-homed host), use [`connect`](TokioSoeClient::connect) instead.
+    ///
+    /// Like [`connect`](TokioSoeClient::connect), this returns as soon as the socket
+    /// is bound and does **not** wait for the session to be established.
+    pub async fn connect_to(
+        server: SocketAddr,
+        config: SocketConfig,
+        tick_period: Duration,
+    ) -> io::Result<Self> {
+        let local = match server {
+            SocketAddr::V4(_) => SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0),
+            SocketAddr::V6(_) => SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 0),
+        };
+        Self::connect(local, server, config, tick_period).await
+    }
+
     /// Binds a UDP socket to `local`, connects it to `server`, and spawns the driver
     /// loop, which immediately sends the session request and ticks every
     /// `tick_period`. A period of 1–10ms is typical.
+    ///
+    /// Most clients don't care about the local address and can use
+    /// [`connect_to`](TokioSoeClient::connect_to), which picks one automatically.
     ///
     /// This returns as soon as the socket is bound; it does **not** wait for the
     /// session to be established. Await [`recv_event`](TokioSoeClient::recv_event)

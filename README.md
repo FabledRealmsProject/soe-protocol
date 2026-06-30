@@ -277,9 +277,9 @@ async fn main() -> std::io::Result<()> {
         ..SocketConfig::default()
     };
 
-    // Binds, connects the socket to the server, and sends the session request.
-    let mut client = TokioSoeClient::connect(
-        "0.0.0.0:0".parse().unwrap(),
+    // Binds an ephemeral local port, connects the socket to the server, and sends
+    // the session request. Use `connect` to pin a specific local address.
+    let mut client = TokioSoeClient::connect_to(
         server,
         config,
         Duration::from_millis(5),
