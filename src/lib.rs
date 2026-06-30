@@ -24,8 +24,8 @@
 //! # Cargo features
 //!
 //! * `tokio` *(off by default)* — enables the Tokio adapters (`TokioSoeSocket`,
-//!   `TokioSoeServer`, `SoeHandle`). With default features the crate has no async
-//!   runtime dependency.
+//!   `TokioSoeServer`, `SoeHandle`, `TokioSoeClient`, `SoeClientHandle`). With default
+//!   features the crate has no async runtime dependency.
 //!
 //! # Quick start
 //!
@@ -103,4 +103,6 @@ pub use session::{
 pub use socket::{RemoteAddr, SocketConfig, SocketEvent, SoeMultiplexer, SoeSocket, UdpTransport};
 pub use sync_rt::SyncSoeSocket;
 #[cfg(feature = "tokio")]
-pub use tokio_rt::{SoeHandle, TokioSoeServer, TokioSoeSocket};
+pub use tokio_rt::{
+    ClientEvent, SoeClientHandle, SoeHandle, TokioSoeClient, TokioSoeServer, TokioSoeSocket,
+};

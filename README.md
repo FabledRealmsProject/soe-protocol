@@ -251,6 +251,67 @@ profiling ever shows the I/O task saturating a core, scale out by running severa
 servers — one per `SO_REUSEPORT` socket — and routing by client address. Because each
 server owns its own socket and `SoeMultiplexer`, this requires no changes to the core.
 
+## Writing a game client
+
+A client talks to a single server, so it needs neither the per-remote routing of a
+server nor a raw step loop. The `tokio` feature provides **`TokioSoeClient`**: an
+actor-style client whose driver task owns the socket and the one session, reachable
+from any task via a cloneable **`SoeClientHandle`**.
+
+```rust
+use std::net::SocketAddr;
+use std::time::Duration;
+use soe_protocol::SessionParameters;
+use soe_protocol::socket::SocketConfig;
+use soe_protocol::tokio_rt::{ClientEvent, TokioSoeClient};
+
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
+    let server: SocketAddr = "127.0.0.1:20260".parse().unwrap();
+
+    let config = SocketConfig {
+        default_session_params: SessionParameters {
+            application_protocol: "MyGame".to_owned(),
+            ..SessionParameters::default()
+        },
+        ..SocketConfig::default()
+    };
+
+    // Binds, connects the socket to the server, and sends the session request.
+    let mut client = TokioSoeClient::connect(
+        "0.0.0.0:0".parse().unwrap(),
+        server,
+        config,
+        Duration::from_millis(5),
+    )
+    .await?;
+
+    // A cloneable handle can send data from any task.
+    let handle = client.handle();
+
+    while let Some(event) = client.recv_event().await {
+        match event {
+            ClientEvent::Connected => {
+                handle.enqueue_data(b"hello".to_vec()); // first event; safe to send now
+            }
+            ClientEvent::DataReceived { data, .. } => {
+                println!("received {} bytes", data.len());
+            }
+            ClientEvent::Disconnected { reason } => {
+                println!("disconnected: {reason:?}");
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+```
+
+`connect` returns as soon as the socket is bound; the first `ClientEvent` is always
+`Connected`, after which it is safe to send. `SoeClientHandle` is `Clone`/`Send` and
+exposes `enqueue_data`, `enqueue_data_on` (to pick a channel), and `terminate` — all
+non-blocking, and none requiring a remote address since the server is implied.
+
 ## Examples
 
 Runnable examples live in [`examples/`](examples/):
@@ -259,7 +320,7 @@ Runnable examples live in [`examples/`](examples/):
 | ------------------------------- | ------- | ----------------------------------------------- |
 | `server-sync` / `client-sync`   | —       | Blocking, std-only echo server and ping client. |
 | `server-tokio` / `client-tokio` | `tokio` | Async echo server and ping client.              |
-| `server-actor`                  | `tokio` | Game-server skeleton: per-client-task fan-out.  |
+| `server-actor` / `client-actor` | `tokio` | Actor-style skeletons: per-client-task fan-out (server) and a driver-task client. |
 
 Run a ping-pong over real UDP:
 
@@ -275,6 +336,10 @@ cargo run --features tokio --example client-tokio -- 127.0.0.1:20260
 # Actor-style game server
 cargo run --features tokio --example server-actor -- 127.0.0.1:20260
 cargo run --features tokio --example client-tokio -- 127.0.0.1:20260
+
+# Actor-style client
+cargo run --features tokio --example server-tokio -- 127.0.0.1:20260
+cargo run --features tokio --example client-actor -- 127.0.0.1:20260
 ```
 
 ## Bring your own runtime

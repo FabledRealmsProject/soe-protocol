@@ -2,7 +2,7 @@
 name = "soe-protocol"
 description = "Sony Online Entertainment protocol implementation in Rust."
 authors = ["yungcomputerchair <me@ycc.dev>"]
-version = "2.0.0"
+version = "2.1.0"
 edition = "2024"
 rust-version = "1.88.0"
 license = "MIT"
@@ -35,6 +35,10 @@ required-features = ["tokio"]
 
 [[example]]
 name = "server-actor"
+required-features = ["tokio"]
+
+[[example]]
+name = "client-actor"
 required-features = ["tokio"]
 
 [[example]]
